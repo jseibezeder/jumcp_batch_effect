@@ -3,6 +3,7 @@ import pandas as pd
 from numpy import random
 import numpy as np
 from sklearn.model_selection import train_test_split
+import json
 
 SEED = 1234
 random.seed(SEED)
@@ -18,7 +19,7 @@ def create_datasplits(data_file, split_type=""):
     table = pq.read_table(filename).to_pandas()
     table = table.sample(frac=1, random_state=SEED).reset_index(drop=True)
     
-    num_classes = len(table["Metadata_JCP2022"].unique())
+    classes = table["Metadata_JCP2022"].unique()
     num_batches = len(table["Metadata_Batch"].unique())
     
     if split_type == "stratified":
@@ -43,6 +44,15 @@ def create_datasplits(data_file, split_type=""):
     val_table.to_csv(f"data/{split_type}_seed{SEED}_val.csv", index=False)
     test_table.to_csv(f"data/{split_type}_seed{SEED}_test.csv", index=False)
 
+    #save mapping of datalabels
+    class_to_id = {cls: idx for idx, cls in enumerate(classes)}
+    id_to_class = {idx: cls for idx, cls in enumerate(classes)}
+
+    with open("class_mapping.json", "w") as f:
+        json.dump(class_to_id, f)
+    with open("id_mapping.json", "w") as f:
+        json.dump(id_to_class, f)
+    
 if __name__ == "__main__":
     filename = "/system/user/publicwork/sanchez/datasets/jumpcp-indices/indices/source_3_filtered_good_batches.pq"
     create_datasplits(filename, "random")
