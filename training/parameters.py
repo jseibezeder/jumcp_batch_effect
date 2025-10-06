@@ -1,5 +1,13 @@
 import argparse
 
+def get_default_params(model_name):
+    # Params from paper (https://arxiv.org/pdf/2103.00020.pdf)
+    if model_name in ["ResNet50"]:
+        return {"lr": 5.0e-4, "beta1": 0.9, "beta2": 0.999, "eps": 1.0e-8}
+    else:
+        return {}
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -19,6 +27,19 @@ def parse_args():
         type=str,
         default=None,
         help="Path to csv file with validation data",
+    )
+    parser.add_argument(
+        "--mapping",
+        type=str,
+        default=None,
+        help="Path to json file with mapping of classes to id",
+    )
+    
+    parser.add_argument(
+        "--num-classes",
+        type=int,
+        default=8,
+        help="Number of classes in classification",
     )
 
     parser.add_argument(
@@ -114,8 +135,8 @@ def parse_args():
     )
     parser.add_argument(
         "--model",
-        choices=["RN50", "RN501", "RN101", "RN50x4", "ViT-B/32", "RN50-pre"],
-        default="RN50",
+        choices=["ResNet50"],
+        default="ResNet50",
         help="Name of the model used for training",
     )
     # arguments for distributed training
@@ -188,6 +209,11 @@ def parse_args():
 
     args = parser.parse_args()
     args.aggregate = not args.skip_aggregate
+
+    default_params = get_default_params(args.model)
+    for name, val in default_params.items():
+        if getattr(args, name) is None:
+            setattr(args, name, val)
 
 
     return args

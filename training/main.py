@@ -1,14 +1,26 @@
 from training.parameters import parse_args
 from training.logger import setup_worker_logging
-
+from training.model import ResNet
+from training.data import get_data
+from training.train import train, evaluate
+from training.logger import setup_primary_logging, setup_worker_logging
+from training.train import get_cosine_with_hard_restarts_schedule_with_warmup, get_cosine_schedule_with_warmup
 
 import random
 import numpy as np
 import os
 import logging
+from pathlib import Path
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from torch.amp import GradScaler
+from torch import optim
+import torch.backends.cudnn as cudnn
+from torch.utils.tensorboard import SummaryWriter
+import json
+from time import gmtime, strftime
+
 
 
 def convert_models_to_fp32(model):
@@ -49,21 +61,17 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         logging.info(f"Use GPU: {args.gpu} for training")
         torch.cuda.set_device(args.gpu)
 
-    #TODO: change on how to laod model
-    model_config_file = Path(__file__).parent / f"model_configs/{args.model.replace('/', '-')}.json"
+    #TODO: change on how to load model
+    model_config_file = Path(__file__).parent / "model_parameter"/ f"{args.model.replace('/', '-')}.json"
     print('Loading model from', model_config_file)
     assert os.path.exists(model_config_file)
     with open(model_config_file, 'r') as f:
         model_info = json.load(f)
     # Additional parameters which are not in the model file
-    model_info['image_resolution'] = args.image_resolution_train
-    model_info['seed'] = args.seed
+    model_info['output_dim'] = args.num_classes
     #print("Start")
-    model = CLIPGeneral(**model_info)
+    model = ResNet(**model_info)
     #print("Model created")
-    convert_weights(model)
-    preprocess_train = _transform(args.image_resolution_train, args.image_resolution_val, is_train=True, normalize=args.normalize, preprocess=args.preprocess_img)
-    preprocess_val = _transform(args.image_resolution_train, args.image_resolution_val, is_train=False, normalize=args.normalize, preprocess=args.preprocess_img)
 
     # See https://discuss.pytorch.org/t/valueerror-attemting-to-unscale-fp16-gradients/81372
     if args.precision == "amp" or args.precision == "fp32" or args.gpu is None:
@@ -74,8 +82,6 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         logging.warning("using CPU, this will be slow")
     else:
         model.cuda(args.gpu)
-        if args.precision == "fp16":
-            convert_weights(model)
         # Previously batch size and workers were global and not per GPU.
         # args.batch_size = args.batch_size / ngpus_per_node)
         # args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
@@ -85,7 +91,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         if args.distributed:
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
     print("Before data")
-    data = get_data(args, (preprocess_train, preprocess_val))
+    data = get_data(args)
     print("Data loaded")
 
 
@@ -100,7 +106,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     gain_or_bias_params = [p for n, p in named_parameters if exclude(n) and p.requires_grad]
     rest_params = [p for n, p in named_parameters if include(n) and p.requires_grad]
 
-    if args.train_index is None:
+    if args.train_file is None:
         optimizer = None
         scheduler = None
     else:
@@ -117,6 +123,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         #define total steps
         total_steps = data["train"].dataloader.num_batches * args.epochs
         #get learning rate scheduler
+        scheduler = None
         if args.lr_scheduler == "cosine":
             scheduler = get_cosine_schedule_with_warmup(optimizer, warmup=args.warmup, num_training_steps=total_steps)
         elif args.lr_scheduler == "cosine-restarts":
@@ -165,11 +172,11 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         writer = SummaryWriter(args.tensorboard_path)
 
     #if we have a validation set
-    if args.train_index is None:
+    if args.train_file is None:
         evaluate(model, data, start_epoch, args, writer, 0)
         return
     #else training
-    elif start_epoch == 0 and args.val_index is not None:
+    elif start_epoch == 0 and args.val_file is not None:
         print("Evaluating")
         evaluate(model, data, 0, args, writer, 0)
     # print("Before train")
@@ -181,7 +188,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         # print(len(data["train"].dataloader.dataset))
         train(model, data, epoch, optimizer, scaler, scheduler, args, writer)
         steps = data["train"].dataloader.num_batches * (epoch + 1)
-        if args.val_index is not None:
+        if args.val_file is not None:
             evaluate(model, data, epoch + 1, args, writer, steps)
 
         # Saving checkpoints.
@@ -200,9 +207,6 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                     os.path.join(args.checkpoint_path, f"epoch_{epoch + 1}.pt"),
                 )
 
-    if args.wandb and (args.gpu == 0 or (not args.distributed)):
-        wandb.finish()
-
 
 
 def main():
@@ -215,7 +219,7 @@ def main():
     #TODO: change model
     #load model configs
     #default model RN50
-    model_config_file = Path(__file__).parent / f"model_configs/{args.model.replace('/', '-')}.json"
+    model_config_file = Path(__file__).parent / f"model_parameter/{args.model.replace('/', '-')}.json"
     assert os.path.exists(model_config_file)
     with open(model_config_file, 'r') as f:
         model_info = json.load(f)
@@ -233,14 +237,9 @@ def main():
 
     # get the name of the experiments
     if args.name is None:
-        #TODO: change name
+        #TODO: change name, and add names for later us
         args.name = strftime(
             f"imgres={img_res_str}_"
-            f"hidden_dim={hidden_dim}_"
-            f"molecule_layers={molecule_layers}_"
-            f"normalize={args.normalize}_"
-            f"init_inv_tau={args.init_inv_tau}_"
-            f"learn_inv_tau={args.learnable_inv_tau}_"
             f"lr={args.lr}_"
             f"wd={args.wd}_"
             f"agg={args.aggregate}_"
@@ -285,7 +284,7 @@ def main():
 
     # Distributed training = training on more than one GPU.
     # Also easily possible to extend to multiple nodes & multiple GPUs.
-    args.distributed = (args.gpu is None) and torch.cuda.is_available() and (not args.dp)
+    args.distributed = (args.gpu is None) and torch.cuda.is_available()
     if args.distributed:
         ngpus_per_node = torch.cuda.device_count()
         args.world_size = ngpus_per_node

@@ -48,9 +48,9 @@ def create_datasplits(data_file, split_type=""):
     class_to_id = {cls: idx for idx, cls in enumerate(classes)}
     id_to_class = {idx: cls for idx, cls in enumerate(classes)}
 
-    with open("class_mapping.json", "w") as f:
+    with open("data/class_mapping.json", "w") as f:
         json.dump(class_to_id, f)
-    with open("id_mapping.json", "w") as f:
+    with open("data/id_mapping.json", "w") as f:
         json.dump(id_to_class, f)
     
 if __name__ == "__main__":
