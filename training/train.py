@@ -122,6 +122,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None):
 
     cumulative_loss = 0.0
     num_elements = 0.0
+    correct = 0.0
 
     with torch.no_grad():
         for batch in dataloader:
@@ -135,14 +136,21 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None):
             cumulative_loss += loss(features, labels) * batch_size
             num_elements += batch_size
 
+            preds = torch.argmax(features, dim=1)
+            correct += (preds == labels).sum().item()
+
 
         loss = cumulative_loss / num_elements
+        acc = correct / num_elements
 
         logging.info(
-            f"Eval Epoch: {epoch}, Loss: {loss} "
+            f"Eval Epoch: {epoch}, Loss: {loss}, Accuracy: {acc} "
         )
 
-
+        if args.save_logs:
+            for name, val in {"loss": loss, "accuracy": acc}:
+                if tb_writer is not None:
+                    tb_writer.add_scalar(f"val/{name}", val, epoch)
     """if args.save_logs:
         with open(os.path.join(args.checkpoint_path, "results.jsonl"), "a+") as f:
             f.write(json.dumps(metrics))
