@@ -31,9 +31,9 @@ class JUMPCPDataset(Dataset):
     def __getitem__(self, index):
         image = self.read_image(self.image_ids[index])
         metadata = {}
-        
         if "Metadata_JCP2022" in self.data.columns:
             mol_class = self.class_mapping[self.data["Metadata_JCP2022"][index]]
+            
 
             if "Metadata_Batch" in self.data.columns:
                 metadata["batch"] = self.data["Metadata_Batch"][index]

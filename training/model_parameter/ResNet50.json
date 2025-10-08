@@ -1,0 +1,11 @@
+{
+    "block": "bottleneck",
+    "input_shape": 5,
+    "layers": [
+        3,
+        4,
+        6,
+        3
+    ],
+    "output_dim":8
+}
