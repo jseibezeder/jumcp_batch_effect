@@ -148,7 +148,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None):
         )
 
         if args.save_logs:
-            for name, val in {"loss": loss, "accuracy": acc}:
+            for name, val in {"loss": loss, "accuracy": acc}.items():
                 if tb_writer is not None:
                     tb_writer.add_scalar(f"val/{name}", val, epoch)
     """if args.save_logs:
