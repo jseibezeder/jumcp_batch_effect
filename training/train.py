@@ -44,7 +44,7 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
     for i, batch in enumerate(dataloader):
         optimizer.zero_grad()
 
-        imgs, labels = batch
+        imgs, labels, metadata = batch
 
 
         if args.gpu is not None:
@@ -126,7 +126,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None):
 
     with torch.no_grad():
         for batch in dataloader:
-            images, labels = batch
+            images, labels, metadata = batch
             if args.gpu is not None:
                 images = images.cuda(args.gpu, non_blocking=True)
                 labels = labels.cuda(args.gpu, non_blocking=True)
