@@ -67,8 +67,6 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     assert os.path.exists(model_config_file)
     with open(model_config_file, 'r') as f:
         model_info = json.load(f)
-    # Additional parameters which are not in the model file
-    model_info['output_dim'] = args.num_classes
     #print("Start")
     model = ResNet(**model_info)
     #print("Model created")
