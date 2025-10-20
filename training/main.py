@@ -4,7 +4,7 @@ from training.model import ResNet
 from training.data import get_data
 from training.train import train, evaluate
 from training.logger import setup_primary_logging, setup_worker_logging
-from training.train import get_cosine_with_hard_restarts_schedule_with_warmup, get_cosine_schedule_with_warmup
+from training.train import get_cosine_with_hard_restarts_schedule_with_warmup, get_cosine_schedule_with_warmup, get_cosine_with_warm_restarts_schedule_with_warmup
 
 import random
 import numpy as np
@@ -128,6 +128,10 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(optimizer, warmup=args.warmup,
                                                                            num_cycles=args.restart_cycles,
                                                                            num_training_steps=total_steps)
+        elif args.lr_scheduler == "cosine-warm":
+            scheduler = get_cosine_with_warm_restarts_schedule_with_warmup(optimizer, warmup=args.warmup,
+                                                                           start_restarts=args.start_restart,
+                                                                           restarts_multiplication=args.restart_mul)
 
     #get a gradscaler if we use automated mixed precision
     scaler = GradScaler() if args.precision == "amp" else None

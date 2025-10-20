@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.amp import autocast
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingWarmRestarts
 import math
 import os
 import gc
@@ -157,6 +158,14 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None):
             f.write("\n")"""
 
     return loss
+
+def get_cosine_with_warm_restarts_schedule_with_warmup(
+        optimizer: Optimizer, warmup: int, start_restarts:int = 10, restarts_multiplication: int = 2):
+    warmup_scheduler = LinearLR(optimizer, start_factor=0.01, end_factor=1, total_iters=warmup)
+
+    cosine_scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=start_restarts, T_mult=restarts_multiplication, eta_min=1e-6)
+
+    return SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup])
 
 
 def get_cosine_schedule_with_warmup(

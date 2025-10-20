@@ -95,6 +95,10 @@ def parse_args():
     parser.add_argument("--lr-scheduler", choices=["cosine", "cosine-restarts"], default="cosine", help="LR scheduler")
     parser.add_argument("--restart-cycles", type=int, default=1,
                         help="Number of restarts when using LR scheduler with restarts")
+    parser.add_argument("--start-restart", type=int, default=10,
+                        help="Number of epoch for first restarts when using LR scheduler with warm restarts")
+    parser.add_argument("--restart-mul", type=int, default=2,
+                        help="Factor to multiply epochs to next restart when using LR scheduler with warm restarts")
     parser.add_argument("--use-bn-sync",
         default=False,
         action="store_true",

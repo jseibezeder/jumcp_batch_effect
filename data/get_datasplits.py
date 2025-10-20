@@ -4,6 +4,11 @@ from numpy import random
 import numpy as np
 from sklearn.model_selection import train_test_split
 import json
+import os
+import tifffile as tiff
+from multiprocessing import Pool
+from tqdm import tqdm
+
 
 SEED = 1234
 random.seed(SEED)
@@ -16,7 +21,7 @@ def create_datasplits(data_file, split_type=""):
     #   "seperated": with this a whole batch(site) is not present in both training and testing 
 
 
-    table = pq.read_table(filename).to_pandas()
+    table = pq.read_table(data_file).to_pandas()
     table = table.sample(frac=1, random_state=SEED).reset_index(drop=True)
     
     classes = table["Metadata_JCP2022"].unique()
@@ -52,7 +57,49 @@ def create_datasplits(data_file, split_type=""):
         json.dump(class_to_id, f)
     with open("data/id_mapping.json", "w") as f:
         json.dump(id_to_class, f)
+
+
+def load_image(filepath):
+    img = tiff.imread(filepath).astype(np.float32) / 255.0
+    return np.transpose(img, (2, 0, 1))
+
+def get_training_means(train_file, image_path, out_file = "", num_workers=8):
+    batchsize = 1024
+    table = pd.read_csv(train_file)
+    mean = 0
+    sum_squard_erros = 0
+    n_total = 0
+
+    filepaths = [os.path.join(image_path, f"{sample_id}.jpg") for sample_id in table["Metadata_Sample_ID"]]
+
+    with Pool(num_workers) as pool:
+        #welford’s online algorithm
+        for batch_start in tqdm(range(0, len(filepaths), batchsize)):
+            batch_paths = filepaths[batch_start:min(batch_start + batchsize,len(filepaths))]
+            batch_images = np.stack(pool.map(load_image, batch_paths), axis=0)
+            B = batch_images.shape[0]
+
+            batch_mean = batch_images.mean(axis=(0, 2, 3))
+            batch_var = batch_images.var(axis=(0, 2, 3))
+
+            if n_total == 0:
+                mean = batch_mean
+                sum_squard_erros = batch_var * B
+                n_total = B
+            else:
+                delta = batch_mean - mean
+                mean += delta * B / (n_total + B)
+                sum_squard_erros += batch_var * B + delta**2 * n_total * B / (n_total + B)
+                n_total += B
+
+    std = np.sqrt(sum_squard_erros / n_total)
+
+    np.savez(out_file,mean=mean, std=std)
     
 if __name__ == "__main__":
     filename = "/system/user/publicwork/sanchez/datasets/jumpcp-indices/indices/source_3_filtered_good_batches.pq"
-    create_datasplits(filename, "random")
+    #create_datasplits(filename, "random")
+    #get_training_means("/system/user/studentwork/seibezed/bachelor/data/random_seed1234_train.csv", "/system/user/publicdata/jumpcp/", "data/random_seed1234_norm.npz")
+    data = np.load("/system/user/studentwork/seibezed/bachelor/data/seperated_seed1234_norm.npz")
+    print(tuple(data["mean"]))
+    #print(data["mean"])
