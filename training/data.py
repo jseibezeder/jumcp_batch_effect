@@ -1,4 +1,4 @@
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 import pandas as pd
 import os
 import tifffile as tiff
@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 class JUMPCPDataset(Dataset):
-    def __init__(self, data_file, image_path, class_mapping, transforms:function = None):
+    def __init__(self, data_file, image_path, class_mapping, transforms = None):
         #TODO: need "Metadata_Sample_ID" for image path
         #"Metadata_JCP2022" for applied compound, this is important for classification
         #additionally: "Metadata_Source" for which lab, "Metadata_Batch" for which batch
@@ -26,6 +26,17 @@ class JUMPCPDataset(Dataset):
         self.class_mapping = class_to_id
         self.number_classes = len(class_to_id)
         self.transforms = transforms
+
+        #variables for grouped sampling
+        if "Metadata_Batch" in self.data.columns:
+            self.unique_batches = self.data["Metadata_Batch"]
+            batch_to_id = {batch: index for index, batch in enumerate(self.unique_batches)}
+            self.n_groups = len(batch_to_id)
+            self.groups = list(range(self.n_groups))
+            self.group_ids = np.array([batch_to_id[batch] for batch in self.data["Metadata_Batch"]])
+            self.group_counts, _ = np.histogram(self.group_ids,
+                                                bins=range(self.n_groups + 1),
+                                                density=False)
    
     def __len__(self):
         return len(self.data)
@@ -34,18 +45,20 @@ class JUMPCPDataset(Dataset):
         image = self.read_image(self.image_ids[index])
 
         metadata = {}
+        group = None
         if "Metadata_JCP2022" in self.data.columns:
             mol_class = self.class_mapping[self.data["Metadata_JCP2022"][index]]
             
 
             if "Metadata_Batch" in self.data.columns:
                 metadata["batch"] = self.data["Metadata_Batch"][index]
+                group = self.group_ids[index]
             if "Metadata_Source" in self.data.columns:
                 metadata["source"] = self.data["Metadata_Source"][index] 
 
             if metadata == {}:
                 return image, mol_class
-            return image, mol_class, metadata
+            return image, mol_class, group, metadata
         else:
             return image
         
@@ -77,7 +90,11 @@ class DataInfo:
     sampler: DistributedSampler
 
 def get_jumcp_data(args, is_train):
-    file = args.train_file if is_train else args.val_file
+    if args.train_indices:
+        file = args.train_file
+        
+    else:
+        file = args.train_file if is_train else args.val_file
     folder = args.image_path
 
     #create transform function
@@ -100,7 +117,12 @@ def get_jumcp_data(args, is_train):
         dataset = JUMPCPDataset(file, folder, args.mapping, transforms)
     else:
         dataset = JUMPCPDataset(file, folder, args.mapping)
-    
+
+    if args.train_indices and is_train:
+        dataset = Subset(dataset, args.train_indices)
+    elif args.val_indices and not is_train:
+        dataset = Subset(dataset, args.val_indices)
+
     num_samples = len(dataset)
     sampler = DistributedSampler(dataset, seed=args.seed) if args.distributed and is_train else None
     shuffle = is_train and sampler is None

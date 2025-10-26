@@ -5,6 +5,7 @@ from training.data import get_data
 from training.train import train, evaluate
 from training.logger import setup_primary_logging, setup_worker_logging
 from training.train import get_cosine_with_hard_restarts_schedule_with_warmup, get_cosine_schedule_with_warmup, get_cosine_with_warm_restarts_schedule_with_warmup
+from training.data import JUMPCPDataset
 
 import random
 import numpy as np
@@ -20,7 +21,8 @@ import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 import json
 from time import gmtime, strftime
-
+from sklearn.model_selection import KFold
+import copy
 
 
 def convert_models_to_fp32(model):
@@ -218,7 +220,6 @@ def main():
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-    #TODO: change model
     #load model configs
     #default model RN50
     model_config_file = Path(__file__).parent / f"model_parameter/{args.model.replace('/', '-')}.json"
@@ -226,16 +227,10 @@ def main():
     with open(model_config_file, 'r') as f:
         model_info = json.load(f)
 
-    #TODO: check if image resolution is needed
     img_res_str = str(args.image_resolution_train)
 
     #check if gpu should be used/cuda is available, and if we should use distrubuted learning
     args.distributed = (args.gpu is None) and torch.cuda.is_available()
-    if args.distributed:
-        ngpus_per_node = torch.cuda.device_count()
-        args.world_size = ngpus_per_node
-    else:
-        args.world_size = 1
 
     # get the name of the experiments
     if args.name is None:
@@ -267,16 +262,51 @@ def main():
 
     assert args.precision in ['amp', 'fp16', 'fp32']
     # assert args.model in ['RN50', 'RN101', 'RN50x4', 'ViT-B/32'] or os.path.exists(args.model)
+    
+    full_dataset = JUMPCPDataset(args.train_file, args.image_path, args.mapping)
 
-    args.ngpus_per_node = torch.cuda.device_count()
+    k_folds = args.cross_validation
+    kfold = KFold(n_splits=k_folds, shuffle=True, random_state=args.seed) if k_folds > 1 else None
 
-    args.tensorboard_path = os.path.join(args.logs, args.name, "tensorboard") if args.tensorboard else ''
-    args.checkpoint_path = os.path.join(args.logs, args.name, "checkpoints")
+    for fold_id, (train_id, val_id) in enumerate(kfold.split(range(len(full_dataset))) if k_folds > 1 else [(None, None)]):
+        print(f"Start fold {fold_id+1}/{k_folds}")
+
+        fold_args = copy.deepcopy(args)
+        fold_args.fold_id = fold_id
+        fold_args.train_indices = train_id
+        fold_args.val_indices = val_id
+
+        fold_args.name = f"{args.name}_fold{fold_id}" if k_folds > 1 else args.name
+        fold_args.log_path = os.path.join(args.logs, fold_args.name, "out.log")
+        fold_args.tensorboard_path = os.path.join(args.logs, fold_args.name, "tensorboard") if fold_args.tensorboard else ''
+        fold_args.checkpoint_path = os.path.join(args.logs, fold_args.name, "checkpoints")
+        for dirname in [fold_args.tensorboard_path, fold_args.checkpoint_path]:
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
+
+        torch.multiprocessing.set_start_method("spawn", force=True)
+        fold_args.log_level = logging.DEBUG if fold_args.debug or fold_args.debug_run else logging.INFO
+        log_queue = setup_primary_logging(fold_args.log_path, fold_args.log_level)
+
+        if fold_args.distributed:
+            ngpus_per_node = torch.cuda.device_count()
+            fold_args.world_size = ngpus_per_node
+            mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, log_queue, fold_args))
+        else:
+            fold_args.world_size = 1
+            main_worker(fold_args.gpu, None, log_queue, fold_args)
+
+        torch.cuda.empty_cache()
+
+        print(f"Logging to {fold_args.log_path}")
+
+    """#args.tensorboard_path = os.path.join(args.logs, args.name, "tensorboard") if args.tensorboard else ''
+    #args.checkpoint_path = os.path.join(args.logs, args.name, "checkpoints")
     for dirname in [args.tensorboard_path, args.checkpoint_path]:
         if dirname:
-            os.makedirs(dirname, exist_ok=True)
+            os.makedirs(dirname, exist_ok=True)"""
 
-    # Set multiprocessing type to spawn.
+    """# Set multiprocessing type to spawn.
     # This is important for logging to work with multiprocessing.
     torch.multiprocessing.set_start_method("spawn")
 
@@ -293,7 +323,7 @@ def main():
         mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, log_queue, args))
     else:
         args.world_size = 1
-        main_worker(args.gpu, None, log_queue, args)
+        main_worker(args.gpu, None, log_queue, args)"""
 
 
 if __name__ == "__main__":

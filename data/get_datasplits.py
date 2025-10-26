@@ -9,11 +9,10 @@ import tifffile as tiff
 from multiprocessing import Pool
 from tqdm import tqdm
 
-
 SEED = 1234
 random.seed(SEED)
 
-def create_datasplits(data_file, split_type=""):
+def create_datasplits(data_file, split_type="", seed_id=1234, add_val=True):
     #function used to create the datasplit file for training validation and testing
     #the data is split into roughly 70% training, 10% validation and 20% testing
     #there are two types of spliting:
@@ -22,7 +21,7 @@ def create_datasplits(data_file, split_type=""):
 
 
     table = pq.read_table(data_file).to_pandas()
-    table = table.sample(frac=1, random_state=SEED).reset_index(drop=True)
+    table = table.sample(frac=1, random_state=seed_id).reset_index(drop=True)
     
     classes = table["Metadata_JCP2022"].unique()
     num_batches = len(table["Metadata_Batch"].unique())
@@ -33,31 +32,37 @@ def create_datasplits(data_file, split_type=""):
 
     elif split_type == "seperated":
         unique_batches = table["Metadata_Batch"].unique()
-        train_batches, test_batches = train_test_split(unique_batches, test_size=0.2, random_state=SEED)
+        train_batches, test_batches = train_test_split(unique_batches, test_size=0.2, random_state=seed_id)
         
         temp_table = table[table["Metadata_Batch"].isin(train_batches)]
         test_table = table[table["Metadata_Batch"].isin(test_batches)]
-        train_table, val_table = train_test_split(temp_table, test_size=1/8, random_state=SEED)
+        if add_val:
+            train_table, val_table = train_test_split(temp_table, test_size=1/8, random_state=seed_id)
+        else:
+            train_table = temp_table
 
 
     elif split_type == "random":
         #split randomly
-        train_table, temp_table = train_test_split(table, test_size=0.3, random_state=SEED)
-        val_table, test_table = train_test_split(temp_table, test_size=2/3, random_state=SEED)
+        temp_table, test_table = train_test_split(table, test_size=0.2, random_state=seed_id)
+        if add_val:
+            train_table, val_table = train_test_split(temp_table, test_size=2/3, random_state=seed_id)
+        else:
+            train_table =temp_table
 
-    train_table.to_csv(f"data/{split_type}_seed{SEED}_train.csv", index=False)
-    val_table.to_csv(f"data/{split_type}_seed{SEED}_val.csv", index=False)
-    test_table.to_csv(f"data/{split_type}_seed{SEED}_test.csv", index=False)
+    train_table.to_csv(f"data/{split_type}_seed{seed_id}_train.csv", index=False)
+    if add_val:
+        val_table.to_csv(f"data/{split_type}_seed{seed_id}_val.csv", index=False)
+    test_table.to_csv(f"data/{split_type}_seed{seed_id}_test.csv", index=False)
 
     #save mapping of datalabels
     class_to_id = {cls: idx for idx, cls in enumerate(classes)}
     id_to_class = {idx: cls for idx, cls in enumerate(classes)}
 
-    with open("data/class_mapping.json", "w") as f:
+    with open(f"data/class_mapping_seed{seed_id}.json", "w") as f:
         json.dump(class_to_id, f)
-    with open("data/id_mapping.json", "w") as f:
+    with open(f"data/id_mapping_seed{seed_id}.json", "w") as f:
         json.dump(id_to_class, f)
-
 
 def load_image(filepath):
     img = tiff.imread(filepath).astype(np.float32) / 255.0
@@ -98,8 +103,8 @@ def get_training_means(train_file, image_path, out_file = "", num_workers=8):
     
 if __name__ == "__main__":
     filename = "/system/user/publicwork/sanchez/datasets/jumpcp-indices/indices/source_3_filtered_good_batches.pq"
-    #create_datasplits(filename, "random")
+    create_datasplits(filename, "random", add_val=False)
     #get_training_means("/system/user/studentwork/seibezed/bachelor/data/random_seed1234_train.csv", "/system/user/publicdata/jumpcp/", "data/random_seed1234_norm.npz")
-    data = np.load("/system/user/studentwork/seibezed/bachelor/data/seperated_seed1234_norm.npz")
-    print(tuple(data["mean"]))
+    #data = np.load("/system/user/studentwork/seibezed/bachelor/data/seperated_seed1234_norm.npz")
+    #print(tuple(data["mean"]))
     #print(data["mean"])

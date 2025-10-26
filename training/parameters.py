@@ -208,6 +208,12 @@ def parse_args():
         default="crop",
         help="Choice of method (default: dataset)"
     )
+    parser.add_argument(
+        "--cross-validation",
+        default= 1,
+        type=int,
+        help="If >1, how many folds to use for cross validation, else standard training"
+    )
 
     parser.add_argument("--seed", default=1234, type=int, help="Seed for reproducibility")
 
