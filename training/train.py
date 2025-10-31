@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch.amp import autocast
+from torch.cuda.amp import autocast
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingWarmRestarts
@@ -45,7 +45,7 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
     for i, batch in enumerate(dataloader):
         optimizer.zero_grad()
 
-        imgs, labels, metadata = batch
+        imgs, labels, _, metadata = batch
 
 
         if args.gpu is not None:
@@ -58,7 +58,7 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
         # with automatic mixed precision.
         device = "cuda" if torch.cuda.is_available() else "cpu"
         if args.precision == "amp":
-            with autocast(device_type = device):
+            with autocast():
                 total_loss = loss(model(images), labels)
                 scaler.scale(total_loss).backward()
                 scaler.step(optimizer)
@@ -127,7 +127,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None):
 
     with torch.no_grad():
         for batch in dataloader:
-            images, labels, metadata = batch
+            images, labels, _, metadata = batch
             if args.gpu is not None:
                 images = images.cuda(args.gpu, non_blocking=True)
                 labels = labels.cuda(args.gpu, non_blocking=True)

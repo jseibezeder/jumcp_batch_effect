@@ -92,7 +92,7 @@ def parse_args():
     parser.add_argument(
         "--warmup", type=int, default=10000, help="Number of steps to warmup for."
     )
-    parser.add_argument("--lr-scheduler", choices=["cosine", "cosine-restarts"], default="cosine", help="LR scheduler")
+    parser.add_argument("--lr-scheduler", choices=["cosine", "cosine-restarts", "cosine-warm"], default="cosine", help="LR scheduler")
     parser.add_argument("--restart-cycles", type=int, default=1,
                         help="Number of restarts when using LR scheduler with restarts")
     parser.add_argument("--start-restart", type=int, default=10,
@@ -178,14 +178,14 @@ def parse_args():
     )
     parser.add_argument(
         "--image-resolution-train",
-        default= 224,
+        default= 499,
         nargs='+',
         type=int,
         help="In DP, which GPUs to use for multigpu training",
     )
     parser.add_argument(
         "--image-resolution-val",
-        default= 224,
+        default= 499,
         nargs='+',
         type=int,
         help="In DP, which GPUs to use for multigpu training",
@@ -204,7 +204,7 @@ def parse_args():
     )
     parser.add_argument(
         "--preprocess-img",
-        choices=["crop", "downsize", "rotate"],
+        choices=["crop", "downsize", "rotate", "None"],
         default="crop",
         help="Choice of method (default: dataset)"
     )

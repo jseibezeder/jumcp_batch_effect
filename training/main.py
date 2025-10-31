@@ -15,7 +15,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from torch.amp import GradScaler
+from torch.cuda.amp import GradScaler
 from torch import optim
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
@@ -180,7 +180,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         evaluate(model, data, start_epoch, args, writer, 0)
         return
     #else training
-    elif start_epoch == 0 and args.val_file is not None:
+    elif start_epoch == 0 and (args.val_file is not None or args.val_indices is not None):
         print("Evaluating")
         evaluate(model, data, 0, args, writer, 0)
     # print("Before train")
@@ -192,7 +192,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         # print(len(data["train"].dataloader.dataset))
         train(model, data, epoch, optimizer, scaler, scheduler, args, writer)
         steps = data["train"].dataloader.num_batches * (epoch + 1)
-        if args.val_file is not None:
+        if (args.val_file is not None or args.val_indices is not None):
             evaluate(model, data, epoch + 1, args, writer, steps)
 
         # Saving checkpoints.
@@ -231,6 +231,9 @@ def main():
 
     #check if gpu should be used/cuda is available, and if we should use distrubuted learning
     args.distributed = (args.gpu is None) and torch.cuda.is_available()
+
+    ngpus_per_node = torch.cuda.device_count()
+    args.world_size = ngpus_per_node
 
     # get the name of the experiments
     if args.name is None:

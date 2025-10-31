@@ -76,7 +76,7 @@ class JUMPCPDataset(Dataset):
         img = torch.tensor(img, dtype=torch.float32) / 255.0
 
         if self.transforms:
-            image = self.transforms(image)
+            img = self.transforms(img)
 
         return img
 
@@ -90,7 +90,7 @@ class DataInfo:
     sampler: DistributedSampler
 
 def get_jumcp_data(args, is_train):
-    if args.train_indices:
+    if args.train_indices is not None:
         file = args.train_file
         
     else:
@@ -101,26 +101,26 @@ def get_jumcp_data(args, is_train):
     if args.normalize == "dataset":
         normalization_coefficients = np.load(args.norm_coef_path)
         transforms = transform_function(n_px_tr=args.image_resolution_train,
-                                        n_px_val= args.val_image_resolution,
+                                        n_px_val= args.image_resolution_val,
                                         is_train= is_train,
                                         normalize= args.normalize, 
                                         norm_coef = normalization_coefficients,
-                                        preprocess=args.preprocess)
+                                        preprocess=args.preprocess_img)
     else:
         transforms = transform_function(n_px_tr=args.image_resolution_train,
-                                       n_px_val= args.val_image_resolution,
+                                       n_px_val= args.image_resolution_val,
                                        is_train= is_train,
                                        normalize= args.normalize, 
-                                       preprocess=args.preprocess)
+                                       preprocess=args.preprocess_img)
 
     if transforms:
         dataset = JUMPCPDataset(file, folder, args.mapping, transforms)
     else:
         dataset = JUMPCPDataset(file, folder, args.mapping)
 
-    if args.train_indices and is_train:
+    if args.train_indices is not None and is_train:
         dataset = Subset(dataset, args.train_indices)
-    elif args.val_indices and not is_train:
+    elif args.val_indices is not None and not is_train:
         dataset = Subset(dataset, args.val_indices)
 
     num_samples = len(dataset)
@@ -148,7 +148,7 @@ def get_data(args):
 
     if args.train_file:
         data["train"] = get_jumcp_data(args, is_train=True)
-    if args.val_file:
+    if args.val_file or args.val_indices is not None:
         data["val"] = get_jumcp_data(args, is_train=False)
 
     return data
@@ -189,13 +189,11 @@ def transform_function(n_px_tr: int, n_px_val: int, is_train: bool, normalize:st
 
     if normalize and resize:
         return Compose([
-            ToTensor(),
             resize,
             normalize,
         ])
     elif resize:
         return Compose([
-            ToTensor(),
             resize,
         ])
     
