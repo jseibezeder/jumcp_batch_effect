@@ -258,30 +258,26 @@ class DistributedGroupSampler(Sampler[_T_co]):
         self.drop_last = drop_last
         self.epoch = 0
         self.seed = seed
-        # If the dataset length is evenly divisible by # of replicas, then there
-        # is no need to drop any data, since the dataset will be split equally.
-        if self.drop_last and len(self.dataset) % self.num_replicas != 0:  # type: ignore[arg-type]
-            # Split to nearest available length that is evenly divisible.
-            # This is to ensure each rank receives the same amount of data when
-            # using this Sampler.
-            self.num_samples = math.ceil(
-                (len(self.dataset) - self.num_replicas) / self.num_replicas  # type: ignore[arg-type]
-            )
-        else:
-            self.num_samples = math.ceil(len(self.dataset) / self.num_replicas)  # type: ignore[arg-type]
-        self.total_size = self.num_samples * self.num_replicas
 
-        #things relevant for Grouped Sampler
-        self.indices = range(self.total_size)
-        self.group_ids = dataset.group_ids
-        self.groups = dataset.groups
-        self.num_groups = dataset.n_groups
-
+        #TODO: implement drop last = False
         self.meta_batch_size = meta_batch_size
         self.support_size = support_size
         self.batch_size = meta_batch_size * support_size
         self.dataset_size = len(self.dataset)
-        self.num_batches = len(self.dataset) // self.batch_size
+        
+        # If the dataset length is evenly divisible by # of replicas, then there
+        # is no need to drop any data, since the dataset will be split equally.
+        if self.drop_last or (len(self.dataset)/self.batch_size) % self.num_replicas == 0:  # type: ignore[arg-type]
+            self.num_batches = int((len(self.dataset)/self.batch_size) / self.num_replicas)
+        else:
+            self.num_batches = int((len(self.dataset)/self.batch_size) / self.num_replicas) + int((4-((len(self.dataset)/self.batch_size) % self.num_replicas)))
+
+        self.total_batches = self.num_batches * self.num_replicas
+
+        #things relevant for Grouped Sampler
+        self.group_ids = dataset.group_ids
+        self.groups = dataset.groups
+        self.num_groups = dataset.n_groups
 
         self.groups_with_ids = {}
         self.actual_groups = []
@@ -300,18 +296,18 @@ class DistributedGroupSampler(Sampler[_T_co]):
 
     def __iter__(self):
         rng = np.random.default_rng(self.seed + self.epoch)
-        n_batches = len(self.dataset) // self.batch_size
+
         if self.uniform_over_groups:
-            sampled_groups = rng.choice(self.groups, size=(n_batches, self.meta_batch_size))
+            sampled_groups = rng.choice(self.groups, size=(self.total_batches, self.meta_batch_size))
         else:
             # Sample groups according to the size of the group
-            sampled_groups = rng.choice(self.groups, size=(n_batches, self.meta_batch_size), p=self.group_prob)
+            sampled_groups = rng.choice(self.groups, size=(self.total_batches, self.meta_batch_size), p=self.group_prob)
 
         group_sizes = np.zeros(sampled_groups.shape)
 
-        all_grouped_batches = np.zeros((self.num_batches, self.batch_size))
+        all_grouped_batches = np.zeros((self.total_batches, self.batch_size))
 
-        for batch_id in range(self.num_batches):
+        for batch_id in range(self.total_batches):
 
             sampled_ids = [rng.choice(self.groups_with_ids[sampled_groups[batch_id, sub_batch]],
                                 size=self.support_size,
@@ -325,12 +321,11 @@ class DistributedGroupSampler(Sampler[_T_co]):
             sampled_ids = np.concatenate(sampled_ids)
             all_grouped_batches[batch_id] = sampled_ids
 
-        #TODO: implement drop last = False
         all_grouped_batches = np.array(all_grouped_batches)
-        batches_per_gpu = all_grouped_batches.shape[0] // self.num_replicas
 
-        gpu_batches = all_grouped_batches[self.rank: self.num_replicas*batches_per_gpu: self.num_replicas]
-        yield iter(gpu_batches)
+        gpu_batches = all_grouped_batches[self.rank:: self.num_replicas]
+        for batch in gpu_batches:
+            yield batch.astype(int)
 
         self.sub_distributions = None
 

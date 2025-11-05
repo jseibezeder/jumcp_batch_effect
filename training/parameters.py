@@ -35,31 +35,7 @@ def parse_args():
         help="Path to json file with mapping of classes to id",
     )
     
-    parser.add_argument(
-        "--num-classes",
-        type=int,
-        default=8,
-        help="Number of classes in classification",
-    )
 
-    parser.add_argument(
-        "--csv-separator",
-        type=str,
-        default="\t",
-        help="For csv-like datasets, which separator to use."
-    )
-    parser.add_argument(
-        "--csv-img-key",
-        type=str,
-        default="filepath",
-        help="For csv-like datasets, the name of the key for the image paths."
-    )
-    parser.add_argument(
-        "--csv-caption-key",
-        type=str,
-        default="title",
-        help="For csv-like datasets, the name of the key for the captions."
-    )
     parser.add_argument(
         "--logs",
         type=str,
@@ -136,6 +112,18 @@ def parse_args():
         choices=["amp", "fp16", "fp32"],
         default="amp",
         help="Floating point precition."
+    )
+    parser.add_argument(
+        "--method",
+        choices=["standard", "armbn", "armll", "memo"],
+        default="standard",
+        help="Method used for training the batch effect"
+    )
+    parser.add_argument(
+        "--meta-batch-size",
+        type=int,
+        default=2,
+        help="How many different meta batche are in a batch"
     )
     parser.add_argument(
         "--model",

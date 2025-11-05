@@ -4,10 +4,24 @@ import os
 import tifffile as tiff
 import json
 from torch.utils.data.distributed import DistributedSampler
+from training.sampler import DistributedGroupSampler
 from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize, RandomResizedCrop, InterpolationMode, RandomCrop, RandomRotation
 from dataclasses import dataclass
 import numpy as np
 import torch
+
+from typing import (
+    Generic,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    Union,
+    Dict
+)
 
 class JUMPCPDataset(Dataset):
     def __init__(self, data_file, image_path, class_mapping, transforms = None):
@@ -29,7 +43,7 @@ class JUMPCPDataset(Dataset):
 
         #variables for grouped sampling
         if "Metadata_Batch" in self.data.columns:
-            self.unique_batches = self.data["Metadata_Batch"]
+            self.unique_batches = self.data["Metadata_Batch"].unique()
             batch_to_id = {batch: index for index, batch in enumerate(self.unique_batches)}
             self.n_groups = len(batch_to_id)
             self.groups = list(range(self.n_groups))
@@ -119,24 +133,38 @@ def get_jumcp_data(args, is_train):
         dataset = JUMPCPDataset(file, folder, args.mapping)
 
     if args.train_indices is not None and is_train:
-        dataset = Subset(dataset, args.train_indices)
+        dataset = CustomSubset(dataset, args.train_indices)
     elif args.val_indices is not None and not is_train:
-        dataset = Subset(dataset, args.val_indices)
+        dataset = CustomSubset(dataset, args.val_indices)
 
     num_samples = len(dataset)
-    sampler = DistributedSampler(dataset, seed=args.seed) if args.distributed and is_train else None
-    shuffle = is_train and sampler is None
     batch_size = args.batch_size if is_train else args.batch_size_eval
-
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=args.workers,
-        pin_memory=True,                            #use for multiprocessing using cuda
-        sampler=sampler,
-        drop_last=is_train
-    )
+    
+    if args.method == "standard":
+        sampler = DistributedSampler(dataset, seed=args.seed) if args.distributed and is_train else None
+        shuffle = is_train and sampler is None
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=args.workers,
+            pin_memory=True,                            #use for multiprocessing using cuda
+            sampler=sampler,
+            drop_last=is_train
+        )
+    elif args.method == "armbn" or args.method == "armll":
+        sampler = DistributedGroupSampler(dataset, 
+                                          meta_batch_size=args.meta_batch_size,
+                                          support_size=args.support_size,
+                                          seed=args.seed)
+        dataloader = DataLoader(
+            dataset,
+            num_workers=args.workers,
+            pin_memory=True,                            #use for multiprocessing using cuda
+            batch_sampler=sampler
+        )
+    elif args.method == "memo":
+        raise NotImplementedError()
 
     dataloader.num_samples = num_samples
     dataloader.num_batches = len(dataloader)
@@ -199,7 +227,43 @@ def transform_function(n_px_tr: int, n_px_val: int, is_train: bool, normalize:st
     
     return None
 
+T_co = TypeVar('T_co', covariant=True)
+class CustomSubset(Dataset[T_co]):
+    r"""
+    Subset of a dataset at specified indices.
 
+    Args:
+        dataset (Dataset): The whole Dataset
+        indices (sequence): Indices in the whole set selected for subset
+    """
+    dataset: Dataset[T_co]
+    indices: Sequence[int]
+
+    def __init__(self, dataset: Dataset[T_co], indices: Sequence[int]) -> None:
+        self.dataset = dataset
+        self.indices = indices
+        self.n_groups = dataset.n_groups
+        self.groups = dataset.groups
+        self.group_ids = dataset.group_ids[indices]
+        self.group_counts, _ = np.histogram(self.group_ids,
+                                            bins=range(self.n_groups + 1),
+                                            density=False)
+
+    def __getitem__(self, idx):
+        if isinstance(idx, list):
+            return self.dataset[[self.indices[i] for i in idx]]
+        return self.dataset[self.indices[idx]]
+
+    def __getitems__(self, indices: List[int]) -> List[T_co]:
+        # add batched sampling support when parent dataset supports it.
+        # see torch.utils.data._utils.fetch._MapDatasetFetcher
+        if callable(getattr(self.dataset, "__getitems__", None)):
+            return self.dataset.__getitems__([self.indices[idx] for idx in indices])  # type: ignore[attr-defined]
+        else:
+            return [self.dataset[self.indices[idx]] for idx in indices]
+
+    def __len__(self):
+        return len(self.indices)
 
 
 if __name__=="__main__":

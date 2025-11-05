@@ -16,6 +16,34 @@ import logging
 def is_master(args):
     return (not args.distributed) or args.gpu == 0
 
+def predict(model, x, args):
+    if args.method == "standard":
+        return model(x)
+    
+    elif args.method == "armbn":
+        model.train()
+
+        n_domains = math.ceil(len(x) / args.support_size)
+
+        logits = []
+        for domain_id in range(n_domains):
+            start = domain_id * args.support_size
+            end = start + args.support_size
+            end = min(len(x), end) # in case final domain has fewer than support size samples
+            domain_x = x[start:end]
+            domain_logits = model(domain_x)
+            logits.append(domain_logits)
+
+        logits = torch.cat(logits)
+
+        return logits
+    
+    elif args.method == "armll":
+        raise NotImplementedError()
+        
+    elif args.method == "memo":
+        raise NotImplementedError()
+
 def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None):
     os.environ["WDS_EPOCH"] = str(epoch)
 
@@ -38,7 +66,10 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
     if args.distributed and sampler is not None:
         sampler.set_epoch(epoch)
 
-    num_batches_per_epoch = dataloader.num_batches
+    if args.method == "standard":
+        num_batches_per_epoch = dataloader.num_batches
+    else:
+        num_batches_per_epoch = int(dataloader.num_batches/4)
 
     end = time.time()
     #print("Before 1st batch")
@@ -132,7 +163,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None):
                 images = images.cuda(args.gpu, non_blocking=True)
                 labels = labels.cuda(args.gpu, non_blocking=True)
 
-            features = model(images)
+            features = predict(model,images,args)
             batch_size = len(images)
             cumulative_loss += loss(features, labels) * batch_size
             num_elements += batch_size

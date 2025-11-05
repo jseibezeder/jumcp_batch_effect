@@ -90,6 +90,13 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         if args.distributed:
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+
+    if args.method == "armbn" or args.method == "armll":
+        if args.batch_size % args.meta_batch_size != 0:
+            raise ValueError("batch_size must be divisible by meta_batch_size")
+        else:
+            args.support_size = int(args.batch_size / args.meta_batch_size)
+
     print("Before data")
     data = get_data(args)
     print("Data loaded")
@@ -121,6 +128,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             eps=args.eps,
         )
         #define total steps
+        steps_per_epoch = data["train"].dataloader.num_batches
         total_steps = data["train"].dataloader.num_batches * args.epochs
         #get learning rate scheduler
         scheduler = None
@@ -132,7 +140,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                                                                            num_training_steps=total_steps)
         elif args.lr_scheduler == "cosine-warm":
             scheduler = get_cosine_with_warm_restarts_schedule_with_warmup(optimizer, warmup=args.warmup,
-                                                                           start_restarts=args.start_restart,
+                                                                           start_restarts=steps_per_epoch*args.start_restart,
                                                                            restarts_multiplication=args.restart_mul)
 
     #get a gradscaler if we use automated mixed precision
@@ -239,6 +247,7 @@ def main():
     if args.name is None:
         #TODO: change name, and add names for later us
         args.name = strftime(
+            f"method={args.method}_"
             f"imgres={img_res_str}_"
             f"lr={args.lr}_"
             f"wd={args.wd}_"
@@ -302,31 +311,6 @@ def main():
         torch.cuda.empty_cache()
 
         print(f"Logging to {fold_args.log_path}")
-
-    """#args.tensorboard_path = os.path.join(args.logs, args.name, "tensorboard") if args.tensorboard else ''
-    #args.checkpoint_path = os.path.join(args.logs, args.name, "checkpoints")
-    for dirname in [args.tensorboard_path, args.checkpoint_path]:
-        if dirname:
-            os.makedirs(dirname, exist_ok=True)"""
-
-    """# Set multiprocessing type to spawn.
-    # This is important for logging to work with multiprocessing.
-    torch.multiprocessing.set_start_method("spawn")
-
-    # Set logger
-    args.log_level = logging.DEBUG if args.debug or args.debug_run else logging.INFO
-    log_queue = setup_primary_logging(args.log_path, args.log_level)
-
-    # Distributed training = training on more than one GPU.
-    # Also easily possible to extend to multiple nodes & multiple GPUs.
-    args.distributed = (args.gpu is None) and torch.cuda.is_available()
-    if args.distributed:
-        ngpus_per_node = torch.cuda.device_count()
-        args.world_size = ngpus_per_node
-        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, log_queue, args))
-    else:
-        args.world_size = 1
-        main_worker(args.gpu, None, log_queue, args)"""
 
 
 if __name__ == "__main__":
