@@ -1,6 +1,6 @@
 from training.parameters import parse_args
 from training.logger import setup_worker_logging
-from training.model import ResNet
+from training.model import ResNet, MLP
 from training.data import get_data
 from training.train import train, evaluate
 from training.logger import setup_primary_logging, setup_worker_logging
@@ -13,6 +13,7 @@ import os
 import logging
 from pathlib import Path
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.cuda.amp import GradScaler
@@ -69,6 +70,13 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     assert os.path.exists(model_config_file)
     with open(model_config_file, 'r') as f:
         model_info = json.load(f)
+
+    #issue on how we predict and backpropagate, since when predicting we predict per sub meta-batch
+    #but when using Automatic mixed precision the backward step failed, since we had differnent versions
+    #of the batch statistics
+    if (args.method == "armbn" or args.method == "armll") and args.distributed:
+        model_info["use_batch_running"] = False
+
     #print("Start")
     model = ResNet(**model_info)
     #print("Model created")
@@ -82,6 +90,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         logging.warning("using CPU, this will be slow")
     else:
         model.cuda(args.gpu)
+        
         # Previously batch size and workers were global and not per GPU.
         # args.batch_size = args.batch_size / ngpus_per_node)
         # args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
@@ -90,6 +99,14 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         if args.distributed:
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+
+    #learned loss model for armll
+    if args.method == "armll":
+        num_classes = model_info["output_dim"]
+        device  ="cuda" if torch.cuda.is_available() else "cpu"
+        learned_loss_net = MLP(in_size=num_classes, norm_reduce=True).to(device)
+    else:
+        learned_loss_net = None
 
     if args.method == "armbn" or args.method == "armll":
         if args.batch_size % args.meta_batch_size != 0:
@@ -118,11 +135,14 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         scheduler = None
     else:
         #define optimizer
-        optimizer = optim.AdamW(
-            [
+        params = [
                 {"params": gain_or_bias_params, "weight_decay": 0.},
                 {"params": rest_params, "weight_decay": args.wd},
-            ],
+            ]
+        if args.method == "armll":
+            params.append({"params": learned_loss_net.parameters()}) 
+        optimizer = optim.AdamW(
+            params,
             lr=args.lr,
             betas=(args.beta1, args.beta2),
             eps=args.eps,
@@ -190,7 +210,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     #else training
     elif start_epoch == 0 and (args.val_file is not None or args.val_indices is not None):
         print("Evaluating")
-        evaluate(model, data, 0, args, writer, 0)
+        evaluate(model, data, 0, args, writer, 0, learned_loss_model=learned_loss_net)
     # print("Before train")
     for epoch in range(start_epoch, args.epochs):
         if args.gpu == 0:
@@ -198,10 +218,10 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
 
         # print("len data")
         # print(len(data["train"].dataloader.dataset))
-        train(model, data, epoch, optimizer, scaler, scheduler, args, writer)
+        train(model, data, epoch, optimizer, scaler, scheduler, args, writer, learned_loss_model = learned_loss_net)
         steps = data["train"].dataloader.num_batches * (epoch + 1)
         if (args.val_file is not None or args.val_indices is not None):
-            evaluate(model, data, epoch + 1, args, writer, steps)
+            evaluate(model, data, epoch + 1, args, writer, steps, learned_loss_model=learned_loss_net)
 
         # Saving checkpoints.
         if args.save_logs and (args.gpu == 0 or (not args.distributed)):

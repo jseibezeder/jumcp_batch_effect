@@ -11,57 +11,143 @@ from pathlib import Path
 import json
 import time
 import logging
+import higher
+import numpy as np
+
 
 
 def is_master(args):
     return (not args.distributed) or args.gpu == 0
 
-def predict(model, x, args):
+def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_loss_model=None, scaler=None, optimizer=None):
     if args.method == "standard":
-        return model(x)
+        if not is_train:
+            model.eval()
+            with torch.no_grad:
+                pred = model(x)
+        else:
+            pred = model(x)
+        loss = loss_fn(pred, labels)
+    
+        return pred, loss
     
     elif args.method == "armbn":
         model.train()
 
         n_domains = math.ceil(len(x) / args.support_size)
-
         logits = []
         for domain_id in range(n_domains):
             start = domain_id * args.support_size
             end = start + args.support_size
             end = min(len(x), end) # in case final domain has fewer than support size samples
             domain_x = x[start:end]
-            domain_logits = model(domain_x)
+            if is_train:
+                domain_logits = model(domain_x)
+            else: 
+                with torch.no_grad():
+                    domain_logits = model(domain_x)
             logits.append(domain_logits)
 
         logits = torch.cat(logits)
 
-        return logits
+        loss = loss_fn(logits, labels)
+
+        return logits, loss
     
     elif args.method == "armll":
-        raise NotImplementedError()
+        model.train()
+        learned_loss_model.train()
+        if optimizer:
+            optimizer.zero_grad(set_to_none=True)
+
+        n_domains = math.ceil(len(x) / args.support_size)
+        with autocast():
+            logits = []
+            loss = []
+            base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+            base_model.train()
+            inner_opt = torch.optim.SGD(base_model.parameters(), lr=args.inner_lr)
+            for domain_id in range(n_domains):
+                start = domain_id*args.support_size
+                end = start + args.support_size
+                end = min(len(x), end) # in case final domain has fewer than support size samples
+
+                domain_x = x[start:end]
+
+                with higher.innerloop_ctx(
+                    base_model, inner_opt, copy_initial_weights=False, track_higher_grads=True) as (fnet, diffopt):
+                    # Inner loop
+                    for _ in range(args.n_inner_iter):
+                        #with autocast():
+                        spt_logits = fnet(domain_x)
+
+                        spt_loss = learned_loss_model(spt_logits)
+
+                        diffopt.step(spt_loss)
+
+                    # Evaluate
+                    
+                    domain_logits = fnet(domain_x)
+                    logits.append(domain_logits.detach().cpu())
+
+                    domain_labels = labels[start:end]
+                    domain_loss = loss_fn(domain_logits, domain_labels)
+                    if is_train and labels is not None:
+                        if scaler:
+                            scaler.scale(domain_loss).backward()
+                        else:
+                            domain_loss.backward()
+                    loss.append(domain_loss.to('cpu').detach().item())
+                #have to delete, since if not some compuational graphs leak and an OutOfMemory(OOM) error occurs
+                del spt_logits, spt_loss, domain_logits, domain_loss
+                torch.cuda.empty_cache()
+        if scaler:
+            scaler.step(optimizer)
+            scaler.update()
+
+        logits = torch.cat(logits)
+
+        """if is_train:
+            return logits, np.mean(loss)
+        else:
+            return logits, _
+        """
+        if is_train:
+            optimizer.zero_grad(set_to_none=True)
+            return logits, np.mean(loss), scaler, optimizer
+        else:
+            return logits, np.mean(loss)
         
     elif args.method == "memo":
-        raise NotImplementedError()
+        if is_train:
+            pred = model(x)
 
-def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None):
+        else:
+            pass
+        loss = loss_fn(pred, labels)
+    
+        return pred, loss
+
+def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None, learned_loss_model = None):
     os.environ["WDS_EPOCH"] = str(epoch)
 
     gc.collect()
     torch.cuda.empty_cache()
 
+
+
     model.train()
     dataloader, sampler = data['train'].dataloader, data['train'].sampler
 
 
-    loss = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss()
 
     model_config_file = Path(__file__).parent / f"model_parameter/{args.model.replace('/', '-')}.json"
     with open(model_config_file, 'r') as f:
         model_info = json.load(f)
 
     if args.gpu is not None:
-        loss = loss.cuda(args.gpu)
+        loss_fn = loss_fn.cuda(args.gpu)
 
     if args.distributed and sampler is not None:
         sampler.set_epoch(epoch)
@@ -69,7 +155,7 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
     if args.method == "standard":
         num_batches_per_epoch = dataloader.num_batches
     else:
-        num_batches_per_epoch = int(dataloader.num_batches/4)
+        num_batches_per_epoch = int(dataloader.num_batches/args.world_size)
 
     end = time.time()
     #print("Before 1st batch")
@@ -88,16 +174,39 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
 
         # with automatic mixed precision.
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        if args.precision == "amp":
+        if args.precision == "amp" and args.method=="armll":
+            pred, total_loss,scaler, optimizer = predict_and_loss(model, 
+                                                    images, 
+                                                    args, 
+                                                    loss_fn=loss_fn, 
+                                                    labels=labels, 
+                                                    learned_loss_model=learned_loss_model, 
+                                                    scaler=scaler,
+                                                    optimizer=optimizer)
+        elif args.precision == "amp":
             with autocast():
-                total_loss = loss(model(images), labels)
+                pred, total_loss = predict_and_loss(model, 
+                                                    images, 
+                                                    args, 
+                                                    loss_fn=loss_fn, 
+                                                    labels=labels, 
+                                                    learned_loss_model=learned_loss_model, 
+                                                    scaler=scaler)
+                torch.autograd.set_detect_anomaly(True)
                 scaler.scale(total_loss).backward()
                 scaler.step(optimizer)
             scaler.update()
 
         else:
-            total_loss = loss(model(images), labels)
-            total_loss.backward()
+            total_loss = predict_and_loss(model, 
+                                          images, 
+                                          args, 
+                                          loss_fn=loss_fn, 
+                                          labels=labels,
+                                          learned_loss_model=learned_loss_model)
+            torch.autograd.set_detect_anomaly(True)
+            if args.method != "armll":
+                total_loss.backward()
             optimizer.step()
 
         scheduler.step()
@@ -135,58 +244,65 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
                     tb_writer.add_scalar(name, val, timestep)
 
 
-def evaluate(model, data, epoch, args, tb_writer=None, steps=None):
+def evaluate(model, data, epoch, args, tb_writer=None, steps=None, learned_loss_model = None):
     if not is_master(args):
         return
 
-    model.eval()
+    #model.eval()
 
     dataloader = data['val'].dataloader
 
-    loss = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss()
     model_config_file = Path(__file__).parent / f"model_parameter/{args.model.replace('/', '-')}.json"
     with open(model_config_file, 'r') as f:
             model_info = json.load(f)
 
     if args.gpu is not None:
-        loss = loss.cuda(args.gpu)
+        loss_fn = loss_fn.cuda(args.gpu)
 
 
     cumulative_loss = 0.0
     num_elements = 0.0
     correct = 0.0
 
-    with torch.no_grad():
-        for batch in dataloader:
-            images, labels, _, metadata = batch
-            if args.gpu is not None:
-                images = images.cuda(args.gpu, non_blocking=True)
-                labels = labels.cuda(args.gpu, non_blocking=True)
 
-            features = predict(model,images,args)
-            batch_size = len(images)
-            cumulative_loss += loss(features, labels) * batch_size
-            num_elements += batch_size
+    for batch in dataloader:
+        images, labels, _, metadata = batch
+        if args.gpu is not None:
+            images = images.cuda(args.gpu, non_blocking=True)
+            labels = labels.cuda(args.gpu, non_blocking=True)
 
-            preds = torch.argmax(features, dim=1)
-            correct += (preds == labels).sum().item()
+        if args.method == "armll":
+            features, loss = predict_and_loss(model,images,args, is_train=False, loss_fn=loss_fn, labels=labels, learned_loss_model=learned_loss_model)
+        else:
+            features, loss = predict_and_loss(model,images,args, is_train=False, loss_fn=loss_fn, labels=labels)
+        batch_size = len(images)
+        cumulative_loss += loss * batch_size
+        num_elements += batch_size
+
+        features = features.to("cpu")
+        labels = labels.to("cpu")
 
 
-        loss = cumulative_loss / num_elements
-        acc = correct / num_elements
+        preds = torch.argmax(features, dim=1)
+        correct += (preds == labels).sum().item()
 
-        logging.info(
-            f"Eval Epoch: {epoch}, Loss: {loss}, Accuracy: {acc} "
-        )
 
-        if args.save_logs:
-            for name, val in {"loss": loss, "accuracy": acc}.items():
-                if tb_writer is not None:
-                    tb_writer.add_scalar(f"val/{name}", val, epoch)
+    loss = cumulative_loss / num_elements
+    acc = correct / num_elements
+
+    logging.info(
+        f"Eval Epoch: {epoch}, Loss: {loss}, Accuracy: {acc} "
+    )
+
+    if args.save_logs:
+        for name, val in {"loss": loss, "accuracy": acc}.items():
+            if tb_writer is not None:
+                tb_writer.add_scalar(f"val/{name}", val, epoch)
     """if args.save_logs:
         with open(os.path.join(args.checkpoint_path, "results.jsonl"), "a+") as f:
-            f.write(json.dumps(metrics))
-            f.write("\n")"""
+        f.write(json.dumps(metrics))
+        f.write("\n")"""
 
     return loss
 

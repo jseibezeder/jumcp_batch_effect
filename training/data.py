@@ -25,7 +25,7 @@ from typing import (
 
 class JUMPCPDataset(Dataset):
     def __init__(self, data_file, image_path, class_mapping, transforms = None):
-        #TODO: need "Metadata_Sample_ID" for image path
+        #need "Metadata_Sample_ID" for image path
         #"Metadata_JCP2022" for applied compound, this is important for classification
         #additionally: "Metadata_Source" for which lab, "Metadata_Batch" for which batch
 
@@ -95,7 +95,6 @@ class JUMPCPDataset(Dataset):
         return img
 
 
-#TODO: can add transform functions
 
 
 @dataclass
@@ -156,7 +155,8 @@ def get_jumcp_data(args, is_train):
         sampler = DistributedGroupSampler(dataset, 
                                           meta_batch_size=args.meta_batch_size,
                                           support_size=args.support_size,
-                                          seed=args.seed)
+                                          seed=args.seed,
+                                          distributed = args.distributed)
         dataloader = DataLoader(
             dataset,
             num_workers=args.workers,

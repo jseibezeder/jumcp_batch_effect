@@ -126,6 +126,18 @@ def parse_args():
         help="How many different meta batche are in a batch"
     )
     parser.add_argument(
+        "--inner-lr",
+        type=float,
+        default=0.1,
+        help="Parameter for learned loss ARM algorithm"
+    )
+    parser.add_argument(
+        "--n_inner_iter",
+        type=int,
+        default=1,
+        help="Parameter for learned loss ARM algorithm"
+    )
+    parser.add_argument(
         "--model",
         choices=["ResNet50"],
         default="ResNet50",

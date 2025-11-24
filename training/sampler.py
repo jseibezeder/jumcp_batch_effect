@@ -87,7 +87,6 @@ _T_co = TypeVar("_T_co", covariant=True)
 
 
 #distributed sampler from pytorch
-#TODO: rewrite such that we get a distributed grouped sampler
 class DistributedSampler(Sampler[_T_co]):
     r"""Sampler that restricts data loading to a subset of the dataset.
 
@@ -235,21 +234,26 @@ class DistributedGroupSampler(Sampler[_T_co]):
         support_size: int = 16,
         uniform_over_groups: bool = True,
         seed: int = 1234,
+        distributed: bool = True
     ) -> None:
         
         #DDP relevant
-        if num_replicas is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
-            num_replicas = dist.get_world_size()
-        if rank is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
-            rank = dist.get_rank()
-        if rank >= num_replicas or rank < 0:
-            raise ValueError(
-                f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas - 1}]"
-            )
+        if distributed:
+            if num_replicas is None:
+                if not dist.is_available():
+                    raise RuntimeError("Requires distributed package to be available")
+                num_replicas = dist.get_world_size()
+            if rank is None:
+                if not dist.is_available():
+                    raise RuntimeError("Requires distributed package to be available")
+                rank = dist.get_rank()
+            if rank >= num_replicas or rank < 0:
+                raise ValueError(
+                    f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas - 1}]"
+                )
+        else:
+            num_replicas=1
+            rank=0
         
 
         self.dataset = dataset
@@ -258,8 +262,7 @@ class DistributedGroupSampler(Sampler[_T_co]):
         self.drop_last = drop_last
         self.epoch = 0
         self.seed = seed
-
-        #TODO: implement drop last = False
+        
         self.meta_batch_size = meta_batch_size
         self.support_size = support_size
         self.batch_size = meta_batch_size * support_size
