@@ -139,7 +139,7 @@ def get_jumcp_data(args, is_train):
     num_samples = len(dataset)
     batch_size = args.batch_size if is_train else args.batch_size_eval
     
-    if args.method == "standard":
+    if args.method == "standard" or args.method == "memo":
         sampler = DistributedSampler(dataset, seed=args.seed) if args.distributed and is_train else None
         shuffle = is_train and sampler is None
         dataloader = DataLoader(
@@ -163,8 +163,7 @@ def get_jumcp_data(args, is_train):
             pin_memory=True,                            #use for multiprocessing using cuda
             batch_sampler=sampler
         )
-    elif args.method == "memo":
-        raise NotImplementedError()
+
 
     dataloader.num_samples = num_samples
     dataloader.num_batches = len(dataloader)

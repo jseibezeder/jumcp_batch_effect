@@ -138,6 +138,24 @@ def parse_args():
         help="Parameter for learned loss ARM algorithm"
     )
     parser.add_argument(
+        "--k-augmentations",
+        type=int,
+        default=2,
+        help="How many augmenations on a single image are applied in a run"
+    )
+    parser.add_argument(
+        "--memo-lr",
+        type=float,
+        default=0.001,
+        help="Learning rate for the test time adaption"
+    )
+    parser.add_argument(
+        "--memo-steps",
+        type=int,
+        default=1,
+        help="Steps for the test time adaption"
+    )
+    parser.add_argument(
         "--model",
         choices=["ResNet50"],
         default="ResNet50",

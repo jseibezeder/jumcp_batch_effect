@@ -13,17 +13,19 @@ import time
 import logging
 import higher
 import numpy as np
+from copy import deepcopy
+from torch.nn.functional import softmax
 
 
 
 def is_master(args):
     return (not args.distributed) or args.gpu == 0
 
-def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_loss_model=None, scaler=None, optimizer=None):
+def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_loss_model=None, scaler=None, optimizer=None, augment_fn=None):
     if args.method == "standard":
         if not is_train:
             model.eval()
-            with torch.no_grad:
+            with torch.no_grad():
                 pred = model(x)
         else:
             pred = model(x)
@@ -43,6 +45,10 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
             domain_x = x[start:end]
             if is_train:
                 domain_logits = model(domain_x)
+                if torch.isnan(domain_logits).any():
+                    logging.info("MODEL OUTPUT IS NAN")
+                    logging.info("Input stats:", domain_x.min(), domain_x.max(), domain_x.mean())
+                    raise SystemExit
             else: 
                 with torch.no_grad():
                     domain_logits = model(domain_x)
@@ -51,6 +57,11 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
         logits = torch.cat(logits)
 
         loss = loss_fn(logits, labels)
+        if torch.isnan(loss):
+            logging.info("LOSS IS NAN")
+            logging.info("Outputs:", logits.min(), logits.max(), logits.mean())
+            logging.info("Targets:", labels.min(), labels.max(), labels.mean())
+            raise SystemExit
 
         return logits, loss
     
@@ -61,7 +72,7 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
             optimizer.zero_grad(set_to_none=True)
 
         n_domains = math.ceil(len(x) / args.support_size)
-        with autocast():
+        with autocast(cache_enabled=True):
             logits = []
             loss = []
             base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
@@ -107,11 +118,7 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
 
         logits = torch.cat(logits)
 
-        """if is_train:
-            return logits, np.mean(loss)
-        else:
-            return logits, _
-        """
+
         if is_train:
             optimizer.zero_grad(set_to_none=True)
             return logits, np.mean(loss), scaler, optimizer
@@ -123,7 +130,33 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
             pred = model(x)
 
         else:
-            pass
+            model.train()
+            original_state = deepcopy(model.state_dict())
+            
+            pred = []
+
+            for x_ind in x:
+                model.train()
+                memo_opt = torch.optim.AdamW(model.parameters(), lr=args.memo_lr)
+                #aug_inputs = torch.cat([augment_fn(x_ind) for _ in range(args.k_augmentations)], dim=0)
+                aug_inputs = torch.stack([augment_fn(x_ind.clone()) for _ in range(args.k_augmentations)], dim=0)
+
+                for _ in range(args.memo_steps):
+                    logits = model(aug_inputs)
+                    probs = softmax(logits, dim=1)
+
+                    p_avg = probs.mean(dim=0)
+
+                    loss = -(p_avg * torch.log(p_avg + 1e-8)).sum()
+                    loss.backward()
+                    memo_opt.step()
+                model.eval()
+                with torch.no_grad():
+                    pred.append(model(x_ind.unsqueeze(0)))
+                model.load_state_dict(original_state)
+                
+            pred = torch.cat(pred, dim=0)
+
         loss = loss_fn(pred, labels)
     
         return pred, loss
@@ -184,7 +217,7 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
                                                     scaler=scaler,
                                                     optimizer=optimizer)
         elif args.precision == "amp":
-            with autocast():
+            with autocast(cache_enabled=True):
                 pred, total_loss = predict_and_loss(model, 
                                                     images, 
                                                     args, 
@@ -192,7 +225,7 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
                                                     labels=labels, 
                                                     learned_loss_model=learned_loss_model, 
                                                     scaler=scaler)
-                torch.autograd.set_detect_anomaly(True)
+                #torch.autograd.set_detect_anomaly(True)
                 scaler.scale(total_loss).backward()
                 scaler.step(optimizer)
             scaler.update()
@@ -204,7 +237,7 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
                                           loss_fn=loss_fn, 
                                           labels=labels,
                                           learned_loss_model=learned_loss_model)
-            torch.autograd.set_detect_anomaly(True)
+            #torch.autograd.set_detect_anomaly(True)
             if args.method != "armll":
                 total_loss.backward()
             optimizer.step()
@@ -244,7 +277,7 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
                     tb_writer.add_scalar(name, val, timestep)
 
 
-def evaluate(model, data, epoch, args, tb_writer=None, steps=None, learned_loss_model = None):
+def evaluate(model, data, epoch, args, tb_writer=None, steps=None, learned_loss_model = None, augment_fn=None):
     if not is_master(args):
         return
 
@@ -275,7 +308,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None, learned_loss_
         if args.method == "armll":
             features, loss = predict_and_loss(model,images,args, is_train=False, loss_fn=loss_fn, labels=labels, learned_loss_model=learned_loss_model)
         else:
-            features, loss = predict_and_loss(model,images,args, is_train=False, loss_fn=loss_fn, labels=labels)
+            features, loss = predict_and_loss(model,images,args, is_train=False, loss_fn=loss_fn, labels=labels, augment_fn=augment_fn)
         batch_size = len(images)
         cumulative_loss += loss * batch_size
         num_elements += batch_size
