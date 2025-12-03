@@ -333,7 +333,7 @@ class DistributedGroupSampler(Sampler[_T_co]):
         self.sub_distributions = None
 
     def __len__(self):
-        return len(self.dataset) // self.batch_size
+        return self.num_batches
     
     def set_epoch(self, epoch: int) -> None:
         r"""
