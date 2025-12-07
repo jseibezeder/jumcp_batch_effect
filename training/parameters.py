@@ -109,8 +109,8 @@ def parse_args():
     )
     parser.add_argument(
         "--precision",
-        choices=["amp", "fp16", "fp32"],
-        default="amp",
+        choices=["fp16", "fp32"],
+        default="fp32",
         help="Floating point precition."
     )
     parser.add_argument(

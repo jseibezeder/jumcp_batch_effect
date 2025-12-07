@@ -1,10 +1,9 @@
 from training.parameters import parse_args
-from training.logger import setup_worker_logging
 from training.model import ResNet, MLP
 from training.data import get_data
 from training.train import train, evaluate
 from training.logger import setup_primary_logging, setup_worker_logging
-from training.train import get_cosine_with_hard_restarts_schedule_with_warmup, get_cosine_schedule_with_warmup, get_cosine_with_warm_restarts_schedule_with_warmup
+from training.scheduler import get_cosine_with_hard_restarts_schedule_with_warmup, get_cosine_schedule_with_warmup, get_cosine_with_warm_restarts_schedule_with_warmup
 from training.data import JUMPCPDataset
 
 import random
@@ -16,11 +15,9 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from torch.cuda.amp import GradScaler
 from torch import optim
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
-import torchvision.transforms.functional as F
 import json
 from time import gmtime, strftime
 from sklearn.model_selection import KFold
@@ -75,7 +72,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     #issue on how we predict and backpropagate, since when predicting we predict per sub meta-batch
     #but when using Automatic mixed precision the backward step failed, since we had differnent versions
     #of the batch statistics
-    if (args.method == "armbn" or args.method == "armll") and args.distributed:
+    if args.method == "armbn" and args.distributed:
         model_info["use_batch_running"] = False
 
     #print("Start")
@@ -83,7 +80,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     #print("Model created")
 
     # See https://discuss.pytorch.org/t/valueerror-attemting-to-unscale-fp16-gradients/81372
-    if args.precision == "amp" or args.precision == "fp32" or args.gpu is None:
+    if args.precision == "fp32" or args.gpu is None:
         convert_models_to_fp32(model)
 
     if not torch.cuda.is_available():
@@ -165,9 +162,6 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                                                                            start_restarts=steps_per_epoch*args.start_restart,
                                                                            restarts_multiplication=args.restart_mul)
 
-    #get a gradscaler if we use automated mixed precision
-    scaler = GradScaler() if args.precision == "amp" else None
-
     # optionally resume from a checkpoint
     start_epoch = 0
     if args.resume is not None:
@@ -220,7 +214,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
 
         # print("len data")
         # print(len(data["train"].dataloader.dataset))
-        train(model, data, epoch, optimizer, scaler, scheduler, args, writer, learned_loss_model = learned_loss_net)
+        train(model, data, epoch, optimizer, scheduler, args, writer, learned_loss_model = learned_loss_net)
         steps = data["train"].dataloader.num_batches * (epoch + 1)
         if (args.val_file is not None or args.val_indices is not None):
             evaluate(model, data, epoch + 1, args, writer, steps, learned_loss_model=learned_loss_net)
@@ -297,7 +291,7 @@ def main():
 
         #setup some parameters for model, wandb/tensorboard
 
-    assert args.precision in ['amp', 'fp16', 'fp32']
+    assert args.precision in ['fp16', 'fp32']
     # assert args.model in ['RN50', 'RN101', 'RN50x4', 'ViT-B/32'] or os.path.exists(args.model)
     
     full_dataset = JUMPCPDataset(args.train_file, args.image_path, args.mapping)

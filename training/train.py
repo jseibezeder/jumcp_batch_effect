@@ -1,9 +1,6 @@
 import torch
 import torch.nn as nn
-from torch.cuda.amp import autocast
-from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LambdaLR
-from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingWarmRestarts
+
 import math
 import os
 import gc
@@ -30,7 +27,7 @@ def marginal_entropy(outputs):
     avg_logits = torch.clamp(avg_logits, min=min_real)
     return -(avg_logits * torch.exp(avg_logits)).sum(dim=-1), avg_logits
 
-def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_loss_model=None, scaler=None, optimizer=None):
+def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_loss_model=None, optimizer=None):
     if args.method == "standard":
         if not is_train:
             model.eval()
@@ -69,61 +66,50 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
         model.train()
         learned_loss_model.train()
         if optimizer:
-            optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad()
 
         n_domains = math.ceil(len(x) / args.support_size)
-        with autocast(cache_enabled=True):
-            logits = []
-            loss = []
-            base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
-            base_model.train()
-            inner_opt = torch.optim.SGD(base_model.parameters(), lr=args.inner_lr)
-            for domain_id in range(n_domains):
-                start = domain_id*args.support_size
-                end = start + args.support_size
-                end = min(len(x), end) # in case final domain has fewer than support size samples
+        logits = []
+        loss = []
+        base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+        base_model.train()
+        inner_opt = torch.optim.SGD(base_model.parameters(), lr=args.inner_lr)
+        for domain_id in range(n_domains):
+            start = domain_id*args.support_size
+            end = start + args.support_size
+            end = min(len(x), end) # in case final domain has fewer than support size samples
 
-                domain_x = x[start:end]
+            domain_x = x[start:end]
 
-                with higher.innerloop_ctx(
-                    base_model, inner_opt, copy_initial_weights=False, track_higher_grads=True) as (fnet, diffopt):
-                    # Inner loop
-                    for _ in range(args.n_inner_iter):
-                        #with autocast():
-                        spt_logits = fnet(domain_x)
+            with higher.innerloop_ctx(
+                base_model, inner_opt, copy_initial_weights=False) as (fnet, diffopt):
+                # Inner loop
+                for _ in range(args.n_inner_iter):
+                    #with autocast():
+                    spt_logits = fnet(domain_x)
 
-                        spt_loss = learned_loss_model(spt_logits)
+                    spt_loss = learned_loss_model(spt_logits)
 
-                        diffopt.step(spt_loss)
+                    diffopt.step(spt_loss)
 
-                    # Evaluate
-                    
-                    domain_logits = fnet(domain_x)
-                    logits.append(domain_logits.detach().cpu())
-
-                    domain_labels = labels[start:end]
-                    domain_loss = loss_fn(domain_logits, domain_labels)
-                    if is_train and labels is not None:
-                        if scaler:
-                            scaler.scale(domain_loss).backward()
-                        else:
-                            domain_loss.backward()
-                    loss.append(domain_loss.to('cpu').detach().item())
-                #have to delete, since if not some compuational graphs leak and an OutOfMemory(OOM) error occurs
-                del spt_logits, spt_loss, domain_logits, domain_loss
-                torch.cuda.empty_cache()
-        if scaler:
-            scaler.step(optimizer)
-            scaler.update()
+                # Evaluate
+                
+                domain_logits = fnet(domain_x)
+                logits.append(domain_logits)
+                #if backprop_loss and labels is not None:
+                domain_labels = labels[start:end]
+                domain_loss = loss_fn(domain_logits, domain_labels)
+                if is_train and labels is not None:
+                    domain_loss.backward()
+                loss.append(domain_loss.to('cpu').detach().item())
+            #have to delete, since if not some compuational graphs leak and an OutOfMemory(OOM) error occurs
+            del spt_logits, spt_loss, domain_logits, domain_loss
+            torch.cuda.empty_cache()
 
         logits = torch.cat(logits)
 
-
-        if is_train and args.precision=="amp":
-            optimizer.zero_grad(set_to_none=True)
-            return logits, np.mean(loss), scaler, optimizer
-        else:
-            return logits, np.mean(loss)
+        #TODO:
+        return logits, np.mean(loss)
         
     elif args.method == "memo":
         if is_train:
@@ -171,7 +157,7 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
     
         return pred, loss
 
-def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None, learned_loss_model = None):
+def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, learned_loss_model = None):
     os.environ["WDS_EPOCH"] = str(epoch)
 
     gc.collect()
@@ -218,40 +204,17 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
 
         # with automatic mixed precision.
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        if args.precision == "amp" and args.method=="armll":
-            pred, total_loss,scaler, optimizer = predict_and_loss(model, 
-                                                    images, 
-                                                    args, 
-                                                    loss_fn=loss_fn, 
-                                                    labels=labels, 
-                                                    learned_loss_model=learned_loss_model, 
-                                                    scaler=scaler,
-                                                    optimizer=optimizer)
-        elif args.precision == "amp" :
-            with autocast(cache_enabled=True):
-                pred, total_loss = predict_and_loss(model, 
-                                                    images, 
-                                                    args, 
-                                                    loss_fn=loss_fn, 
-                                                    labels=labels, 
-                                                    learned_loss_model=learned_loss_model, 
-                                                    scaler=scaler)
-                #torch.autograd.set_detect_anomaly(True)
-                scaler.scale(total_loss).backward()
-                scaler.step(optimizer)
-            scaler.update()
-
-        else:
-            pred, total_loss = predict_and_loss(model, 
-                                          images, 
-                                          args, 
-                                          loss_fn=loss_fn, 
-                                          labels=labels,
-                                          learned_loss_model=learned_loss_model)
-            #torch.autograd.set_detect_anomaly(True)
-            if args.method != "armll":
-                total_loss.backward()
-            optimizer.step()
+    
+        pred, total_loss = predict_and_loss(model, 
+                                        images, 
+                                        args, 
+                                        loss_fn=loss_fn, 
+                                        labels=labels,
+                                        learned_loss_model=learned_loss_model)
+        #torch.autograd.set_detect_anomaly(True)
+        if args.method != "armll":
+            total_loss.backward()
+        optimizer.step()
 
         scheduler.step()
 
@@ -350,79 +313,3 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None, learned_loss_
 
     return loss
 
-def get_cosine_with_warm_restarts_schedule_with_warmup(
-        optimizer: Optimizer, warmup: int, start_restarts:int = 10, restarts_multiplication: int = 2):
-    warmup_scheduler = LinearLR(optimizer, start_factor=0.01, end_factor=1, total_iters=warmup)
-
-    cosine_scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=start_restarts, T_mult=restarts_multiplication, eta_min=1e-6)
-
-    return SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup])
-
-
-def get_cosine_schedule_with_warmup(
-        optimizer: Optimizer, warmup: int, num_training_steps: int, num_cycles: float = 0.5, last_epoch: int = -1
-):
-    """
-    Create a schedule with a learning rate that decreases following the values of the cosine function between the
-    initial lr set in the optimizer to 0, after a warmup period during which it increases linearly between 0 and the
-    initial lr set in the optimizer.
-
-    Args:
-        optimizer (:class:`~torch.optim.Optimizer`):
-            The optimizer for which to schedule the learning rate.
-        warmup (:obj:`int`):
-            The number of steps for the warmup phase.
-        num_training_steps (:obj:`int`):
-            The total number of training steps.
-        num_cycles (:obj:`float`, `optional`, defaults to 0.5):
-            The number of waves in the cosine schedule (the defaults is to just decrease from the max value to 0
-            following a half-cosine).
-        last_epoch (:obj:`int`, `optional`, defaults to -1):
-            The index of the last epoch when resuming training.
-
-    Return:
-        :obj:`torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.
-    """
-
-    def lr_lambda(current_step):
-        if current_step < warmup:
-            return float(current_step) / float(max(1, warmup))
-        progress = float(current_step - warmup) / float(max(1, num_training_steps - warmup))
-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))
-
-    return LambdaLR(optimizer, lr_lambda, last_epoch)
-
-
-def get_cosine_with_hard_restarts_schedule_with_warmup(
-        optimizer: Optimizer, warmup: int, num_training_steps: int, num_cycles: int = 1, last_epoch: int = -1
-):
-    """
-    Create a schedule with a learning rate that decreases following the values of the cosine function between the
-    initial lr set in the optimizer to 0, with several hard restarts, after a warmup period during which it increases
-    linearly between 0 and the initial lr set in the optimizer.
-
-    Args:
-        optimizer (:class:`~torch.optim.Optimizer`):
-            The optimizer for which to schedule the learning rate.
-        warmup (:obj:`int`):
-            The number of steps for the warmup phase.
-        num_training_steps (:obj:`int`):
-            The total number of training steps.
-        num_cycles (:obj:`int`, `optional`, defaults to 1):
-            The number of hard restarts to use.
-        last_epoch (:obj:`int`, `optional`, defaults to -1):
-            The index of the last epoch when resuming training.
-
-    Return:
-        :obj:`torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.
-    """
-
-    def lr_lambda(current_step):
-        if current_step < warmup:
-            return float(current_step) / float(max(1, warmup))
-        progress = float(current_step - warmup) / float(max(1, num_training_steps - warmup))
-        if progress >= 1.0:
-            return 0.0
-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * ((float(num_cycles) * progress) % 1.0))))
-
-    return LambdaLR(optimizer, lr_lambda, last_epoch)
