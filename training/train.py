@@ -15,13 +15,22 @@ import higher
 import numpy as np
 from copy import deepcopy
 from torch.nn.functional import softmax
+from training.augmentations import augment_and_mix
 
 
 
 def is_master(args):
     return (not args.distributed) or args.gpu == 0
 
-def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_loss_model=None, scaler=None, optimizer=None, augment_fn=None):
+#loss for memo
+def marginal_entropy(outputs):
+    logits = outputs - outputs.logsumexp(dim=-1, keepdim=True)
+    avg_logits = logits.logsumexp(dim=0) - np.log(logits.shape[0])
+    min_real = torch.finfo(avg_logits.dtype).min
+    avg_logits = torch.clamp(avg_logits, min=min_real)
+    return -(avg_logits * torch.exp(avg_logits)).sum(dim=-1), avg_logits
+
+def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_loss_model=None, scaler=None, optimizer=None):
     if args.method == "standard":
         if not is_train:
             model.eval()
@@ -45,10 +54,6 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
             domain_x = x[start:end]
             if is_train:
                 domain_logits = model(domain_x)
-                if torch.isnan(domain_logits).any():
-                    logging.info("MODEL OUTPUT IS NAN")
-                    logging.info("Input stats:", domain_x.min(), domain_x.max(), domain_x.mean())
-                    raise SystemExit
             else: 
                 with torch.no_grad():
                     domain_logits = model(domain_x)
@@ -57,11 +62,6 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
         logits = torch.cat(logits)
 
         loss = loss_fn(logits, labels)
-        if torch.isnan(loss):
-            logging.info("LOSS IS NAN")
-            logging.info("Outputs:", logits.min(), logits.max(), logits.mean())
-            logging.info("Targets:", labels.min(), labels.max(), labels.mean())
-            raise SystemExit
 
         return logits, loss
     
@@ -119,7 +119,7 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
         logits = torch.cat(logits)
 
 
-        if is_train:
+        if is_train and args.precision=="amp":
             optimizer.zero_grad(set_to_none=True)
             return logits, np.mean(loss), scaler, optimizer
         else:
@@ -130,30 +130,40 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
             pred = model(x)
 
         else:
-            model.train()
             original_state = deepcopy(model.state_dict())
             
             pred = []
 
             for x_ind in x:
-                model.train()
-                memo_opt = torch.optim.AdamW(model.parameters(), lr=args.memo_lr)
-                #aug_inputs = torch.cat([augment_fn(x_ind) for _ in range(args.k_augmentations)], dim=0)
-                aug_inputs = torch.stack([augment_fn(x_ind.clone()) for _ in range(args.k_augmentations)], dim=0)
+                model.eval()            
+                memo_opt = torch.optim.SGD(model.parameters(), lr=args.memo_lr)
+
+                if args.prior_strength < 0:
+                    nn.BatchNorm2d.prior = 1
+                else:
+                    nn.BatchNorm2d.prior = float(args.prior_strength) / float(args.prior_strength + 1)
+
+
+                aug_inputs = torch.stack([augment_and_mix(x_ind.clone(), seed=args.seed) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
 
                 for _ in range(args.memo_steps):
                     logits = model(aug_inputs)
-                    probs = softmax(logits, dim=1)
+                    memo_opt.zero_grad()
 
-                    p_avg = probs.mean(dim=0)
-
-                    loss = -(p_avg * torch.log(p_avg + 1e-8)).sum()
+                    loss, logits = marginal_entropy(logits)
+                    
                     loss.backward()
                     memo_opt.step()
-                model.eval()
+                nn.BatchNorm2d.prior = 1
+
+                if args.prior_strength < 0:
+                    nn.BatchNorm2d.prior = 1
+                else:
+                    nn.BatchNorm2d.prior = float(args.prior_strength) / float(args.prior_strength + 1)
                 with torch.no_grad():
                     pred.append(model(x_ind.unsqueeze(0)))
                 model.load_state_dict(original_state)
+                nn.BatchNorm2d.prior = 1
                 
             pred = torch.cat(pred, dim=0)
 
@@ -185,6 +195,7 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
     if args.distributed and sampler is not None:
         sampler.set_epoch(epoch)
 
+    #TODO: fix percentage
     if args.method == "standard":
         num_batches_per_epoch = dataloader.num_batches
     else:
@@ -216,7 +227,7 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
                                                     learned_loss_model=learned_loss_model, 
                                                     scaler=scaler,
                                                     optimizer=optimizer)
-        elif args.precision == "amp":
+        elif args.precision == "amp" :
             with autocast(cache_enabled=True):
                 pred, total_loss = predict_and_loss(model, 
                                                     images, 
@@ -231,7 +242,7 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
             scaler.update()
 
         else:
-            total_loss = predict_and_loss(model, 
+            pred, total_loss = predict_and_loss(model, 
                                           images, 
                                           args, 
                                           loss_fn=loss_fn, 
@@ -277,7 +288,7 @@ def train(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None
                     tb_writer.add_scalar(name, val, timestep)
 
 
-def evaluate(model, data, epoch, args, tb_writer=None, steps=None, learned_loss_model = None, augment_fn=None):
+def evaluate(model, data, epoch, args, tb_writer=None, steps=None, learned_loss_model = None):
     if not is_master(args):
         return
 
@@ -308,7 +319,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None, learned_loss_
         if args.method == "armll":
             features, loss = predict_and_loss(model,images,args, is_train=False, loss_fn=loss_fn, labels=labels, learned_loss_model=learned_loss_model)
         else:
-            features, loss = predict_and_loss(model,images,args, is_train=False, loss_fn=loss_fn, labels=labels, augment_fn=augment_fn)
+            features, loss = predict_and_loss(model,images,args, is_train=False, loss_fn=loss_fn, labels=labels)
         batch_size = len(images)
         cumulative_loss += loss * batch_size
         num_elements += batch_size

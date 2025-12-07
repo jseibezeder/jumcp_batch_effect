@@ -148,43 +148,6 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             eps=args.eps,
         )
 
-        #define augemnt function for memo
-        if args.method == "memo":
-            def random_flip(x):
-                if random.random() < 0.5:
-                    x = torch.flip(x, dims=[2])   # horizontal
-                if random.random() < 0.5:
-                    x = torch.flip(x, dims=[1])   # vertical
-                return x
-
-            def random_rotation(x):
-                """Rotate by a random angle between -30° and +30°."""
-                angle = random.uniform(10, 30)
-                return F.rotate(x, angle)
-
-            def random_gaussian_noise(x, sigma_range=(0.0, 0.1)):
-                """Add Gaussian noise independently per channel."""
-                sigma = random.uniform(*sigma_range)
-                noise = torch.randn_like(x) * sigma
-                return x + noise
-
-            def random_blur(x):
-                """Apply Gaussian blur to ALL channels."""
-                radius = random.uniform(0.1, 1.5)
-                return F.gaussian_blur(x, kernel_size=5, sigma=radius)
-
-            def random_intensity_scale(x, scale_range=(0.8, 1.2)):
-                """Multiply pixel intensities channelwise; safe for microscopy."""
-                scale = random.uniform(*scale_range)
-                return x * scale
-
-            def augment_fn(x, max_ops=4):
-                ops = random.sample([random_flip, random_rotation, random_gaussian_noise, random_blur, random_intensity_scale], k=random.randint(1, max_ops))
-                for op in ops:
-                    x = op(x)
-                return x
-        else:
-            augment_fn = None
 
         #define total steps
         steps_per_epoch = data["train"].dataloader.num_batches
@@ -249,7 +212,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     #else training
     elif start_epoch == 0 and (args.val_file is not None or args.val_indices is not None):
         print("Evaluating")
-        evaluate(model, data, 0, args, writer, 0, learned_loss_model=learned_loss_net, augment_fn=augment_fn)
+        evaluate(model, data, 0, args, writer, 0, learned_loss_model=learned_loss_net)
     # print("Before train")
     for epoch in range(start_epoch, args.epochs):
         if args.gpu == 0:
@@ -260,21 +223,24 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         train(model, data, epoch, optimizer, scaler, scheduler, args, writer, learned_loss_model = learned_loss_net)
         steps = data["train"].dataloader.num_batches * (epoch + 1)
         if (args.val_file is not None or args.val_indices is not None):
-            evaluate(model, data, epoch + 1, args, writer, steps, learned_loss_model=learned_loss_net, augment_fn=augment_fn)
+            evaluate(model, data, epoch + 1, args, writer, steps, learned_loss_model=learned_loss_net)
 
         # Saving checkpoints.
         if args.save_logs and (args.gpu == 0 or (not args.distributed)):
             if (epoch + 1) == args.epochs or (
                     args.save_frequency > 0 and ((epoch + 1) % args.save_frequency) == 0
             ):
-                torch.save(
-                    {
+                params_to_save = {
                         "epoch": epoch + 1,
                         "name": args.name,
                         "state_dict": model.state_dict(),
                         "optimizer": optimizer.state_dict(),
                         "scheduler": scheduler.state_dict()
-                    },
+                    }
+                if args.method == "armll":
+                    params_to_save["ll_state_dict"] = learned_loss_net.state_dict()
+                torch.save(
+                    params_to_save,
                     os.path.join(args.checkpoint_path, f"epoch_{epoch + 1}.pt"),
                 )
 
@@ -345,8 +311,7 @@ def main():
 
     for fold_id, (train_id, val_id) in enumerate(kfold.split(range(len(full_dataset))) if k_folds > 1 else [(None, None)]):
         print(f"Start fold {fold_id+1}/{k_folds}")
-        if fold_id<=2:
-            continue
+
         fold_args = copy.deepcopy(args)
         fold_args.fold_id = fold_id
         fold_args.train_indices = train_id

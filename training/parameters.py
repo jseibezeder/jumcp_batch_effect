@@ -140,7 +140,7 @@ def parse_args():
     parser.add_argument(
         "--k-augmentations",
         type=int,
-        default=2,
+        default=8,
         help="How many augmenations on a single image are applied in a run"
     )
     parser.add_argument(
@@ -155,6 +155,13 @@ def parse_args():
         default=1,
         help="Steps for the test time adaption"
     )
+    parser.add_argument(
+        "--prior-strength",
+        type=int,
+        default=16,
+        help="Determine strength of BatchNorms2d on memo prediction"
+    )
+
     parser.add_argument(
         "--model",
         choices=["ResNet50"],
