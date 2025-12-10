@@ -26,7 +26,20 @@ def parse_args():
         "--val-file",
         type=str,
         default=None,
-        help="Path to csv file with validation data",
+        help="Path to csv file with validation data, including data and filepaths",
+    )
+    parser.add_argument(
+        "--split-type",
+        type=str,
+        default="seperated",
+        help="How the train-file is split in cross-validation",
+        choices = ["random", "seperated", "stratified"]
+    )
+    parser.add_argument(
+        "--add-val",
+        type=bool,
+        default=False,
+        help="Whether to add a validation file"
     )
     parser.add_argument(
         "--mapping",
@@ -69,6 +82,7 @@ def parse_args():
         "--warmup", type=int, default=10000, help="Number of steps to warmup for."
     )
     parser.add_argument("--lr-scheduler", choices=["cosine", "cosine-restarts", "cosine-warm"], default="cosine", help="LR scheduler")
+    parser.add_argument("--patience", type=int, default=10, help="Patience for early stopping")
     parser.add_argument("--restart-cycles", type=int, default=1,
                         help="Number of restarts when using LR scheduler with restarts")
     parser.add_argument("--start-restart", type=int, default=10,
@@ -115,10 +129,26 @@ def parse_args():
     )
     parser.add_argument(
         "--method",
-        choices=["standard", "armbn", "armll", "memo"],
-        default="standard",
+        choices=["erm","armcml", "armbn", "armll", "memo"],
+        default="erm",
         help="Method used for training the batch effect"
     )
+    parser.add_argument(
+        "--n-context-channels",
+        type=int,
+        default=3,
+        help="Context channels used in ARM for ConvNets"
+    )
+    parser.add_argument(
+        "--cml-hidden-dim",
+        type=int,
+        default=32,
+        help="Size of hidden dimension in context network"
+    )
+    parser.add_argument('--pret_add_channels', type=int, default=1,
+        help="Size of hidden dimension in context network")
+    parser.add_argument('--adapt-bn', type=bool, default=False,
+        help="Whether to adapt the batch norms in ARMCML")
     parser.add_argument(
         "--meta-batch-size",
         type=int,
@@ -239,6 +269,7 @@ def parse_args():
         type=int,
         help="If >1, how many folds to use for cross validation, else standard training"
     )
+    
 
     parser.add_argument("--seed", default=1234, type=int, help="Seed for reproducibility")
 

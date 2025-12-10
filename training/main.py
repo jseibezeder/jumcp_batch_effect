@@ -1,10 +1,9 @@
 from training.parameters import parse_args
-from training.model import ResNet, MLP
-from training.data import get_data
+from training.model import ResNet, MLP, ContextNet
+from training.data import get_data, create_datasplits
 from training.train import train, evaluate
 from training.logger import setup_primary_logging, setup_worker_logging
 from training.scheduler import get_cosine_with_hard_restarts_schedule_with_warmup, get_cosine_schedule_with_warmup, get_cosine_with_warm_restarts_schedule_with_warmup
-from training.data import JUMPCPDataset
 
 import random
 import numpy as np
@@ -20,7 +19,6 @@ import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 import json
 from time import gmtime, strftime
-from sklearn.model_selection import KFold
 import copy
 
 
@@ -69,10 +67,13 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     with open(model_config_file, 'r') as f:
         model_info = json.load(f)
 
+    if args.method == "armcml":
+        model_info["input_shape"] += args.n_context_channels
+
     #issue on how we predict and backpropagate, since when predicting we predict per sub meta-batch
     #but when using Automatic mixed precision the backward step failed, since we had differnent versions
     #of the batch statistics
-    if args.method == "armbn" and args.distributed:
+    if args.method == "armbn" or (args.method == "armcml" and args.adapt_bn):
         model_info["use_batch_running"] = False
 
     #print("Start")
@@ -101,11 +102,18 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     if args.method == "armll":
         num_classes = model_info["output_dim"]
         device  ="cuda" if torch.cuda.is_available() else "cpu"
-        learned_loss_net = MLP(in_size=num_classes, norm_reduce=True).to(device)
+        arm_net = MLP(in_size=num_classes, norm_reduce=True).to(device)
+    elif args.method == "armcml":
+        num_classes = model_info["output_dim"]
+        device  ="cuda" if torch.cuda.is_available() else "cpu"
+        arm_net = ContextNet(5, args.n_context_channels,
+                                 hidden_dim=args.cml_hidden_dim, kernel_size=5, use_running_stats=args.adapr_bn).to(device)
     else:
-        learned_loss_net = None
+        arm_net = None
+    if arm_net!=None:
+        arm_net = torch.nn.parallel.DistributedDataParallel(arm_net, device_ids=[args.gpu])
 
-    if args.method == "armbn" or args.method == "armll":
+    if "arm" in args.method:
         if args.batch_size % args.meta_batch_size != 0:
             raise ValueError("batch_size must be divisible by meta_batch_size")
         else:
@@ -137,7 +145,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                 {"params": rest_params, "weight_decay": args.wd},
             ]
         if args.method == "armll":
-            params.append({"params": learned_loss_net.parameters()}) 
+            params.append({"params": arm_net.parameters()}) 
         optimizer = optim.AdamW(
             params,
             lr=args.lr,
@@ -204,20 +212,24 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         evaluate(model, data, start_epoch, args, writer, 0)
         return
     #else training
-    elif start_epoch == 0 and (args.val_file is not None or args.val_indices is not None):
+    elif start_epoch == 0 and (args.val_file is not None or args.test_indices is not None):
         print("Evaluating")
-        evaluate(model, data, 0, args, writer, 0, learned_loss_model=learned_loss_net)
+        evaluate(model, data, 0, args, writer, 0, arm_net=arm_net)
     # print("Before train")
+
+    prev_best_loss = np.inf
+    counter = 0
+
     for epoch in range(start_epoch, args.epochs):
         if args.gpu == 0:
             logging.info(f'Start epoch {epoch}')
 
         # print("len data")
         # print(len(data["train"].dataloader.dataset))
-        train(model, data, epoch, optimizer, scheduler, args, writer, learned_loss_model = learned_loss_net)
+        train(model, data, epoch, optimizer, scheduler, args, writer, arm_net=arm_net)
         steps = data["train"].dataloader.num_batches * (epoch + 1)
-        if (args.val_file is not None or args.val_indices is not None):
-            evaluate(model, data, epoch + 1, args, writer, steps, learned_loss_model=learned_loss_net)
+        if (args.val_file is not None or args.test_indices is not None):
+            loss = evaluate(model, data, epoch + 1, args, writer, steps, arm_net=arm_net)
 
         # Saving checkpoints.
         if args.save_logs and (args.gpu == 0 or (not args.distributed)):
@@ -231,14 +243,22 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                         "optimizer": optimizer.state_dict(),
                         "scheduler": scheduler.state_dict()
                     }
-                if args.method == "armll":
-                    params_to_save["ll_state_dict"] = learned_loss_net.state_dict()
+                if args.method == "armll" or args.method == "armcml":
+                    params_to_save["armnet_state_dict"] = arm_net.state_dict()
                 torch.save(
                     params_to_save,
                     os.path.join(args.checkpoint_path, f"epoch_{epoch + 1}.pt"),
                 )
 
+        if loss < prev_best_loss:
+            prev_best_loss = loss
+            counter = 0
+        else:
+            counter += 1
 
+        if counter > args.patience:
+            logging.info("Stopped early")
+            break
 
 def main():
     args = parse_args()
@@ -293,25 +313,24 @@ def main():
 
     assert args.precision in ['fp16', 'fp32']
     # assert args.model in ['RN50', 'RN101', 'RN50x4', 'ViT-B/32'] or os.path.exists(args.model)
-    
-    full_dataset = JUMPCPDataset(args.train_file, args.image_path, args.mapping)
+
 
     torch.multiprocessing.set_start_method("spawn", force=True)
 
-    k_folds = args.cross_validation
-    kfold = KFold(n_splits=k_folds, shuffle=True, random_state=args.seed) if k_folds > 1 else None
 
-
-
-    for fold_id, (train_id, val_id) in enumerate(kfold.split(range(len(full_dataset))) if k_folds > 1 else [(None, None)]):
-        print(f"Start fold {fold_id+1}/{k_folds}")
+    for fold_id in range(args.cross_validation):
+        print(f"Start fold {fold_id+1}/{args.cross_validation}")
 
         fold_args = copy.deepcopy(args)
         fold_args.fold_id = fold_id
-        fold_args.train_indices = train_id
-        fold_args.val_indices = val_id
 
-        fold_args.name = f"{args.name}/fold{fold_id}" if k_folds > 1 else args.name
+        train_idx, val_idx, test_idx = create_datasplits(args, seed_id=args.seed+fold_id)
+
+        fold_args.train_indices = train_idx
+        fold_args.val_indices = val_idx
+        fold_args.test_indices = test_idx 
+
+        fold_args.name = f"{args.name}/fold{fold_id}" if args.cross_validation > 1 else args.name
         fold_args.log_path = os.path.join(args.logs, fold_args.name, "out.log")
         fold_args.tensorboard_path = os.path.join(args.logs, fold_args.name, "tensorboard") if fold_args.tensorboard else ''
         fold_args.checkpoint_path = os.path.join(args.logs, fold_args.name, "checkpoints")

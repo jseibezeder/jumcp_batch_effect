@@ -28,7 +28,7 @@ def create_datasplits(data_file, split_type="", seed_id=1234, add_val=True):
     
     if split_type == "stratified":
         #TODO: lets see if we want to implement this
-        pass
+        raise NotImplementedError()
 
     elif split_type == "seperated":
         unique_batches = table["Metadata_Batch"].unique()
@@ -103,7 +103,10 @@ def get_training_means(train_file, image_path, out_file = "", num_workers=8):
     
 if __name__ == "__main__":
     filename = "/system/user/publicwork/sanchez/datasets/jumpcp-indices/indices/source_3_filtered_good_batches.pq"
-    create_datasplits(filename, "random", add_val=False)
+    table = pq.read_table(filename).to_pandas()
+    print(len(table))
+    
+    #create_datasplits(filename, "random", add_val=False)
     #get_training_means("/system/user/studentwork/seibezed/bachelor/data/random_seed1234_train.csv", "/system/user/publicdata/jumpcp/", "data/random_seed1234_norm.npz")
     #data = np.load("/system/user/studentwork/seibezed/bachelor/data/seperated_seed1234_norm.npz")
     #print(tuple(data["mean"]))

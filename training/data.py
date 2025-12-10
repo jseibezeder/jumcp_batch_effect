@@ -9,6 +9,8 @@ from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normal
 from dataclasses import dataclass
 import numpy as np
 import torch
+import pyarrow.parquet as pq
+from sklearn.model_selection import train_test_split
 
 from typing import (
     Generic,
@@ -29,7 +31,8 @@ class JUMPCPDataset(Dataset):
         #"Metadata_JCP2022" for applied compound, this is important for classification
         #additionally: "Metadata_Source" for which lab, "Metadata_Batch" for which batch
 
-        table = pd.read_csv(data_file)
+        #table = pd.read_csv(data_file)
+        table = pq.read_table(data_file).to_pandas().reset_index(drop=True)
 
         with open(class_mapping, "r") as f:
             class_to_id = json.load(f)
@@ -112,6 +115,7 @@ def get_jumcp_data(args, is_train):
 
     #create transform function
     if args.normalize == "dataset":
+        #TODO: make on the go
         normalization_coefficients = np.load(args.norm_coef_path)
         transforms = transform_function(n_px_tr=args.image_resolution_train,
                                         n_px_val= args.image_resolution_val,
@@ -133,13 +137,13 @@ def get_jumcp_data(args, is_train):
 
     if args.train_indices is not None and is_train:
         dataset = CustomSubset(dataset, args.train_indices)
-    elif args.val_indices is not None and not is_train:
-        dataset = CustomSubset(dataset, args.val_indices)
+    elif args.test_indices is not None and not is_train:
+        dataset = CustomSubset(dataset, args.test_indices)
 
     num_samples = len(dataset)
     batch_size = args.batch_size if is_train else args.batch_size_eval
     
-    if args.method == "standard" or args.method == "memo":
+    if args.method == "erm" or args.method == "memo":
         sampler = DistributedSampler(dataset, seed=args.seed) if args.distributed and is_train else None
         shuffle = is_train and sampler is None
         dataloader = DataLoader(
@@ -151,7 +155,7 @@ def get_jumcp_data(args, is_train):
             sampler=sampler,
             drop_last=is_train
         )
-    elif args.method == "armbn" or args.method == "armll":
+    elif "arm" in args.method:
         sampler = DistributedGroupSampler(dataset, 
                                           meta_batch_size=args.meta_batch_size,
                                           support_size=args.support_size,
@@ -175,7 +179,7 @@ def get_data(args):
 
     if args.train_file:
         data["train"] = get_jumcp_data(args, is_train=True)
-    if args.val_file or args.val_indices is not None:
+    if args.val_file or args.test_indices is not None:
         data["val"] = get_jumcp_data(args, is_train=False)
 
     return data
@@ -241,13 +245,19 @@ class CustomSubset(Dataset[T_co]):
     def __init__(self, dataset: Dataset[T_co], indices: Sequence[int]) -> None:
         self.dataset = dataset
         self.indices = indices
-        self.n_groups = dataset.n_groups
-        self.groups = dataset.groups
         self.group_ids = dataset.group_ids[indices]
-        self.group_counts, _ = np.histogram(self.group_ids,
+
+        unique = np.unique(self.group_ids)
+        self.groups = unique.tolist()
+        self.n_groups = len(self.groups)
+        self.group_counts = np.array([
+        np.sum(self.group_ids == g) for g in self.groups
+        ])
+        
+        """self.group_counts, _ = np.histogram(self.group_ids,
                                             bins=range(self.n_groups + 1),
                                             density=False)
-
+"""
     def __getitem__(self, idx):
         if isinstance(idx, list):
             return self.dataset[[self.indices[i] for i in idx]]
@@ -263,6 +273,52 @@ class CustomSubset(Dataset[T_co]):
 
     def __len__(self):
         return len(self.indices)
+
+def create_datasplits(args, seed_id=1234):
+    #function used to create the datasplit file for training validation and testing
+    #the data is split into roughly 70% training, 10% validation and 20% testing
+    #there are two types of spliting:
+    #   "stratified": this ensures that data from each site and batch are present in trainand test sets
+    #   "seperated": with this a whole batch(site) is not present in both training and testing 
+
+    table = pq.read_table(args.train_file).to_pandas().reset_index(drop=True)
+    
+    classes = table["Metadata_JCP2022"].unique()
+    
+    if args.split_type == "stratified":
+        #TODO: lets see if we want to implement this
+        raise NotImplementedError()
+
+    elif args.split_type == "seperated":
+        unique_batches = table["Metadata_Batch"].unique()
+        train_batches, test_batches = train_test_split(unique_batches, test_size=1/args.cross_validation, random_state=seed_id)
+        
+        """temp_table = table[table["Metadata_Batch"].isin(train_batches)]
+        test_table = table[table["Metadata_Batch"].isin(test_batches)]
+        if args.add_val:
+            #TODO: what test size?
+            train_table, val_table = train_test_split(temp_table, test_size=1/8, random_state=seed_id)
+        else:
+            train_table = temp_table"""
+
+        train_idx = table.index[table["Metadata_Batch"].isin(train_batches)].tolist()
+        test_idx  = table.index[table["Metadata_Batch"].isin(test_batches)].tolist()
+        if args.add_val:
+            train_idx, val_idx = train_test_split(train_idx, test_size=1/8, random_state=seed_id)
+        else: val_idx = None
+
+    elif args.split_type == "random":
+        #split randomly
+        train_idx, test_idx = train_test_split(table, test_size=1/args.cross_validation, random_state=seed_id)
+        if args.add_val:
+            #TODO: what test size?
+            train_idx, val_idx = train_test_split(train_idx, test_size=2/3, random_state=seed_id)
+        else:
+            val_idx = None
+
+
+
+    return train_idx, val_idx, test_idx
 
 
 if __name__=="__main__":

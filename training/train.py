@@ -27,8 +27,8 @@ def marginal_entropy(outputs):
     avg_logits = torch.clamp(avg_logits, min=min_real)
     return -(avg_logits * torch.exp(avg_logits)).sum(dim=-1), avg_logits
 
-def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_loss_model=None, optimizer=None):
-    if args.method == "standard":
+def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=None):
+    if args.method == "erm":
         if not is_train:
             model.eval()
             with torch.no_grad():
@@ -38,6 +38,30 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
         loss = loss_fn(pred, labels)
     
         return pred, loss
+    
+    elif args.method == "armcml":
+        batch_size, c, h, w = x.shape
+        torch.autograd.set_detect_anomaly(True)
+        if args.adapt_bn:
+            out = []
+            for i in range(args.meta_batch_size):
+                x_i = x[i*args.support_size:(i+1)*args.support_size]
+                context_i = arm_net(x_i)
+                context_i = context_i.mean(dim=0).expand(args.support_size, -1, -1, -1)
+                x_i = torch.cat([x_i, context_i], dim=1)
+                out.append(model(x_i))
+            logits = torch.cat(out)
+        else:
+            context = arm_net(x) # Shape: batch_size, channels, H, W
+            context = context.reshape((args.meta_batch_size, args.support_size, args.n_context_channels, h, w))
+            context = context.mean(dim=1) # Shape: meta_batch_size, self.n_context_channels
+            context = torch.repeat_interleave(context, repeats=args.support_size, dim=0) # meta_batch_size * support_size, context_size
+            x = torch.cat([x, context], dim=1)
+            logits = model(x)
+        
+        loss = loss_fn(logits, labels)
+        return logits, loss
+
     
     elif args.method == "armbn":
         model.train()
@@ -64,9 +88,7 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
     
     elif args.method == "armll":
         model.train()
-        learned_loss_model.train()
-        if optimizer:
-            optimizer.zero_grad()
+        arm_net.train()
 
         n_domains = math.ceil(len(x) / args.support_size)
         logits = []
@@ -85,10 +107,9 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
                 base_model, inner_opt, copy_initial_weights=False) as (fnet, diffopt):
                 # Inner loop
                 for _ in range(args.n_inner_iter):
-                    #with autocast():
                     spt_logits = fnet(domain_x)
 
-                    spt_loss = learned_loss_model(spt_logits)
+                    spt_loss = arm_net(spt_logits)
 
                     diffopt.step(spt_loss)
 
@@ -103,8 +124,8 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
                     domain_loss.backward()
                 loss.append(domain_loss.to('cpu').detach().item())
             #have to delete, since if not some compuational graphs leak and an OutOfMemory(OOM) error occurs
-            del spt_logits, spt_loss, domain_logits, domain_loss
-            torch.cuda.empty_cache()
+            #del spt_logits, spt_loss, domain_logits, domain_loss
+            #torch.cuda.empty_cache()
 
         logits = torch.cat(logits)
 
@@ -116,8 +137,8 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
             pred = model(x)
 
         else:
-            original_state = deepcopy(model.state_dict())
-            
+            #original_state = deepcopy(model.state_dict())
+            orig_params = [p.detach().clone() for p in model.parameters()]
             pred = []
 
             for x_ind in x:
@@ -130,8 +151,8 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
                     nn.BatchNorm2d.prior = float(args.prior_strength) / float(args.prior_strength + 1)
 
 
-                aug_inputs = torch.stack([augment_and_mix(x_ind.clone(), seed=args.seed) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
-
+                aug_inputs = torch.stack([augment_and_mix(x_ind, seed=args.seed) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
+                print(aug_inputs)
                 for _ in range(args.memo_steps):
                     logits = model(aug_inputs)
                     memo_opt.zero_grad()
@@ -148,7 +169,10 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
                     nn.BatchNorm2d.prior = float(args.prior_strength) / float(args.prior_strength + 1)
                 with torch.no_grad():
                     pred.append(model(x_ind.unsqueeze(0)))
-                model.load_state_dict(original_state)
+                #model.load_state_dict(original_state)
+                with torch.no_grad():
+                    for p, orig in zip(model.parameters(), orig_params):
+                        p.copy_(orig)
                 nn.BatchNorm2d.prior = 1
                 
             pred = torch.cat(pred, dim=0)
@@ -157,7 +181,7 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, learned_los
     
         return pred, loss
 
-def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, learned_loss_model = None):
+def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_net = None):
     os.environ["WDS_EPOCH"] = str(epoch)
 
     gc.collect()
@@ -182,13 +206,13 @@ def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, learne
         sampler.set_epoch(epoch)
 
     #TODO: fix percentage
-    if args.method == "standard":
+    if args.method == "erm":
         num_batches_per_epoch = dataloader.num_batches
     else:
         num_batches_per_epoch = int(dataloader.num_batches/args.world_size)
 
     end = time.time()
-    #print("Before 1st batch")
+
     for i, batch in enumerate(dataloader):
         optimizer.zero_grad()
 
@@ -210,10 +234,16 @@ def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, learne
                                         args, 
                                         loss_fn=loss_fn, 
                                         labels=labels,
-                                        learned_loss_model=learned_loss_model)
+                                        arm_net=arm_net)
         #torch.autograd.set_detect_anomaly(True)
         if args.method != "armll":
             total_loss.backward()
+
+        """if args.method == "armll":
+            if (i+1)%8==0:
+                optimizer.step()
+        else:
+            optimizer.step()"""
         optimizer.step()
 
         scheduler.step()
@@ -251,7 +281,7 @@ def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, learne
                     tb_writer.add_scalar(name, val, timestep)
 
 
-def evaluate(model, data, epoch, args, tb_writer=None, steps=None, learned_loss_model = None):
+def evaluate(model, data, epoch, args, tb_writer=None, steps=None, arm_net = None):
     if not is_master(args):
         return
 
@@ -279,10 +309,8 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None, learned_loss_
             images = images.cuda(args.gpu, non_blocking=True)
             labels = labels.cuda(args.gpu, non_blocking=True)
 
-        if args.method == "armll":
-            features, loss = predict_and_loss(model,images,args, is_train=False, loss_fn=loss_fn, labels=labels, learned_loss_model=learned_loss_model)
-        else:
-            features, loss = predict_and_loss(model,images,args, is_train=False, loss_fn=loss_fn, labels=labels)
+        features, loss = predict_and_loss(model,images,args, is_train=False, loss_fn=loss_fn, labels=labels, arm_net=arm_net)
+
         batch_size = len(images)
         cumulative_loss += loss * batch_size
         num_elements += batch_size
