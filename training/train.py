@@ -41,7 +41,6 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
     
     elif args.method == "armcml":
         batch_size, c, h, w = x.shape
-        torch.autograd.set_detect_anomaly(True)
         if args.adapt_bn:
             out = []
             for i in range(args.meta_batch_size):
@@ -205,11 +204,12 @@ def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_ne
     if args.distributed and sampler is not None:
         sampler.set_epoch(epoch)
 
-    #TODO: fix percentage
+    """#TODO: fix percentage
     if args.method == "erm":
         num_batches_per_epoch = dataloader.num_batches
     else:
-        num_batches_per_epoch = int(dataloader.num_batches/args.world_size)
+        num_batches_per_epoch = int(dataloader.num_batches/args.world_size)"""
+    num_batches_per_epoch = dataloader.num_batches
 
     end = time.time()
 
@@ -283,7 +283,7 @@ def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_ne
 
 def evaluate(model, data, epoch, args, tb_writer=None, steps=None, arm_net = None):
     if not is_master(args):
-        return
+        return 
 
     #model.eval()
 
@@ -302,6 +302,9 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None, arm_net = Non
     num_elements = 0.0
     correct = 0.0
 
+    #need to use the base model without the wrapper or elsewise early stopping wont work
+    base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+
 
     for batch in dataloader:
         images, labels, _, metadata = batch
@@ -309,7 +312,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None, arm_net = Non
             images = images.cuda(args.gpu, non_blocking=True)
             labels = labels.cuda(args.gpu, non_blocking=True)
 
-        features, loss = predict_and_loss(model,images,args, is_train=False, loss_fn=loss_fn, labels=labels, arm_net=arm_net)
+        features, loss = predict_and_loss(base_model,images,args, is_train=False, loss_fn=loss_fn, labels=labels, arm_net=arm_net)
 
         batch_size = len(images)
         cumulative_loss += loss * batch_size

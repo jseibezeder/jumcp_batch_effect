@@ -216,9 +216,9 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         print("Evaluating")
         evaluate(model, data, 0, args, writer, 0, arm_net=arm_net)
     # print("Before train")
-
-    prev_best_loss = np.inf
-    counter = 0
+    if is_master(args) or not args.distributed:
+        prev_best_loss = np.inf
+        counter = 0
 
     for epoch in range(start_epoch, args.epochs):
         if args.gpu == 0:
@@ -250,13 +250,33 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                     os.path.join(args.checkpoint_path, f"epoch_{epoch + 1}.pt"),
                 )
 
-        if loss < prev_best_loss:
-            prev_best_loss = loss
-            counter = 0
+        if args.distributed:
+            device = torch.device("cuda", args.gpu) if torch.cuda.is_available() else torch.device("cpu")
+            early_stop = torch.zeros(1).to(device)
         else:
-            counter += 1
+            early_stop = 0
+        if is_master(args):
+            if loss < prev_best_loss:
+                prev_best_loss = loss
+                counter = 0
+            elif loss != np.inf:
+                counter += 1
 
-        if counter > args.patience:
+            if counter > args.patience:
+                early_stop += 1
+
+
+        if args.distributed:
+            logging.info("waiting")
+            dist.barrier()
+            logging.info("Send early stop")
+            dist.all_reduce(early_stop, op=dist.ReduceOp.SUM)
+            logging.info("recieve early stop")
+            logging.info(f"early stop signal: {early_stop}")
+
+        # now every process checks the same flag
+        if early_stop == 1:
+            # optionally call a barrier to make sure everyone reaches this point before continuing
             logging.info("Stopped early")
             break
 
