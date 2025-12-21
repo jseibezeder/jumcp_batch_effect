@@ -107,9 +107,6 @@ def parse_args():
         help="Use this flag to skip the learning rate decay.",
     )
     parser.add_argument(
-        "--save-frequency", type=int, default=1, help="How often to save checkpoints."
-    )
-    parser.add_argument(
         "--save-most-recent",
         action="store_true",
         default=False,
@@ -142,8 +139,14 @@ def parse_args():
     parser.add_argument(
         "--cml-hidden-dim",
         type=int,
-        default=32,
+        default=64,
         help="Size of hidden dimension in context network"
+    )
+    parser.add_argument(
+        "--grad-acc",
+        type=int,
+        default=1,
+        help="Use gradient accumulation for models, defines after how many steps the gradients are accumulated"
     )
     parser.add_argument('--pret_add_channels', type=int, default=1,
         help="Size of hidden dimension in context network")

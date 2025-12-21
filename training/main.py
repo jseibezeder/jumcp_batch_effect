@@ -83,6 +83,9 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     # See https://discuss.pytorch.org/t/valueerror-attemting-to-unscale-fp16-gradients/81372
     if args.precision == "fp32" or args.gpu is None:
         convert_models_to_fp32(model)
+    else:
+        model = model.half()
+
 
     if not torch.cuda.is_available():
         model.float()
@@ -107,12 +110,19 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         num_classes = model_info["output_dim"]
         device  ="cuda" if torch.cuda.is_available() else "cpu"
         arm_net = ContextNet(5, args.n_context_channels,
-                                 hidden_dim=args.cml_hidden_dim, kernel_size=5, use_running_stats=args.adapr_bn).to(device)
+                                 hidden_dim=args.cml_hidden_dim, kernel_size=5, use_running_stats=args.adapt_bn).to(device)
     else:
         arm_net = None
     if arm_net!=None:
-        arm_net = torch.nn.parallel.DistributedDataParallel(arm_net, device_ids=[args.gpu])
-
+        if args.precision == "fp32" or args.gpu is None:
+            convert_models_to_fp32(arm_net)
+        else:
+            arm_net = arm_net.half()
+        if args.distributed and args.use_bn_sync:
+            arm_net = torch.nn.SyncBatchNorm.convert_sync_batchnorm(arm_net)
+        if args.distributed:
+            arm_net = torch.nn.parallel.DistributedDataParallel(arm_net, device_ids=[args.gpu])
+        
     if "arm" in args.method:
         if args.batch_size % args.meta_batch_size != 0:
             raise ValueError("batch_size must be divisible by meta_batch_size")
@@ -156,7 +166,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
 
         #define total steps
         steps_per_epoch = data["train"].dataloader.num_batches
-        total_steps = data["train"].dataloader.num_batches * args.epochs
+        total_steps = data["train"].dataloader.num_batches * args.epochs / args.grad_acc
         #get learning rate scheduler
         scheduler = None
         if args.lr_scheduler == "cosine":
@@ -207,9 +217,10 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     if args.save_logs and args.tensorboard:
         writer = SummaryWriter(args.tensorboard_path)
 
+
     #if we have a validation set
     if args.train_file is None:
-        evaluate(model, data, start_epoch, args, writer, 0)
+        evaluate(model, data, start_epoch, args, writer, 0, arm_net=arm_net)
         return
     #else training
     elif start_epoch == 0 and (args.val_file is not None or args.test_indices is not None):
@@ -231,25 +242,6 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         if (args.val_file is not None or args.test_indices is not None):
             loss = evaluate(model, data, epoch + 1, args, writer, steps, arm_net=arm_net)
 
-        # Saving checkpoints.
-        if args.save_logs and (args.gpu == 0 or (not args.distributed)):
-            if (epoch + 1) == args.epochs or (
-                    args.save_frequency > 0 and ((epoch + 1) % args.save_frequency) == 0
-            ):
-                params_to_save = {
-                        "epoch": epoch + 1,
-                        "name": args.name,
-                        "state_dict": model.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "scheduler": scheduler.state_dict()
-                    }
-                if args.method == "armll" or args.method == "armcml":
-                    params_to_save["armnet_state_dict"] = arm_net.state_dict()
-                torch.save(
-                    params_to_save,
-                    os.path.join(args.checkpoint_path, f"epoch_{epoch + 1}.pt"),
-                )
-
         if args.distributed:
             device = torch.device("cuda", args.gpu) if torch.cuda.is_available() else torch.device("cpu")
             early_stop = torch.zeros(1).to(device)
@@ -263,20 +255,38 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                 counter += 1
 
             if counter > args.patience:
+            #if True:
                 early_stop += 1
 
 
+        # Saving checkpoints.
+        if args.save_logs and (args.gpu == 0 or (not args.distributed)) and (counter == 0 or early_stop==1):
+            params_to_save = {
+                    "epoch": epoch + 1,
+                    "name": args.name,
+                    "state_dict": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict()
+                }
+            if args.method == "armll" or args.method == "armcml":
+                params_to_save["armnet_state_dict"] = arm_net.state_dict()
+            torch.save(
+                params_to_save,
+                os.path.join(args.checkpoint_path, f"epoch_{epoch + 1}.pt"),
+            )
+
+
+
         if args.distributed:
-            logging.info("waiting")
+            #logging.info("waiting")
             dist.barrier()
-            logging.info("Send early stop")
+            #logging.info("Send early stop")
             dist.all_reduce(early_stop, op=dist.ReduceOp.SUM)
-            logging.info("recieve early stop")
-            logging.info(f"early stop signal: {early_stop}")
+            #logging.info("recieve early stop")
+            #logging.info(f"early stop signal: {early_stop}")
 
         # now every process checks the same flag
         if early_stop == 1:
-            # optionally call a barrier to make sure everyone reaches this point before continuing
             logging.info("Stopped early")
             break
 
