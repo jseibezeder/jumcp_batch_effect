@@ -59,7 +59,7 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
             logits = model(x)
         
         loss = loss_fn(logits, labels)
-        return logits, loss
+        return logits.detach().cpu(), loss
 
     
     elif args.method == "armbn":
@@ -115,7 +115,7 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
                 # Evaluate
                 
                 domain_logits = fnet(domain_x)
-                logits.append(domain_logits)
+                logits.append(domain_logits.detach().cpu())
                 #if backprop_loss and labels is not None:
                 domain_labels = labels[start:end]
                 domain_loss = loss_fn(domain_logits, domain_labels)
@@ -212,22 +212,22 @@ def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_ne
     num_batches_per_epoch = dataloader.num_batches
 
     end = time.time()
-
+    optimizer.zero_grad()
     for i, batch in enumerate(dataloader):
-        optimizer.zero_grad()
+        
 
         imgs, labels, _, metadata = batch
-
+        
 
         if args.gpu is not None:
             images = imgs.cuda(args.gpu, non_blocking=True)
             labels = labels.cuda(args.gpu, non_blocking=True)
+        if args.precision == "fp16":
+            images = images.half()
+            #labels = labels.half()
+
 
         data_time = time.time() - end
-        m = model.module if args.distributed else model
-
-        # with automatic mixed precision.
-        device = "cuda" if torch.cuda.is_available() else "cpu"
     
         pred, total_loss = predict_and_loss(model, 
                                         images, 
@@ -244,9 +244,10 @@ def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_ne
                 optimizer.step()
         else:
             optimizer.step()"""
-        optimizer.step()
-
-        scheduler.step()
+        if (i+1)%args.grad_acc == 0:
+            optimizer.step()
+            optimizer.zero_grad()
+            scheduler.step()
 
         batch_time = time.time() - end
         end = time.time()
@@ -282,6 +283,7 @@ def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_ne
 
 
 def evaluate(model, data, epoch, args, tb_writer=None, steps=None, arm_net = None):
+    
     if not is_master(args):
         return 
 
@@ -304,6 +306,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None, arm_net = Non
 
     #need to use the base model without the wrapper or elsewise early stopping wont work
     base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+    base_arm_net = arm_net.module if isinstance(arm_net, torch.nn.parallel.DistributedDataParallel) else arm_net
 
 
     for batch in dataloader:
@@ -311,8 +314,11 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None, arm_net = Non
         if args.gpu is not None:
             images = images.cuda(args.gpu, non_blocking=True)
             labels = labels.cuda(args.gpu, non_blocking=True)
+        if args.precision == "fp16":
+            images = images.half()
+            #labels = labels.half()
 
-        features, loss = predict_and_loss(base_model,images,args, is_train=False, loss_fn=loss_fn, labels=labels, arm_net=arm_net)
+        features, loss = predict_and_loss(base_model,images,args, is_train=False, loss_fn=loss_fn, labels=labels, arm_net=base_arm_net)
 
         batch_size = len(images)
         cumulative_loss += loss * batch_size
@@ -341,6 +347,6 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None, arm_net = Non
         with open(os.path.join(args.checkpoint_path, "results.jsonl"), "a+") as f:
         f.write(json.dumps(metrics))
         f.write("\n")"""
-
+    
     return loss
 
