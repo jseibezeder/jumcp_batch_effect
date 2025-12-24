@@ -102,17 +102,20 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
 
     #learned loss model for armll
+    inner_opt = None
+    arm_net = None
     if args.method == "armll":
         num_classes = model_info["output_dim"]
         device  ="cuda" if torch.cuda.is_available() else "cpu"
         arm_net = MLP(in_size=num_classes, norm_reduce=True).to(device)
+        inner_opt = torch.optim.SGD(model.parameters(), lr=args.inner_lr)
+        
     elif args.method == "armcml":
         num_classes = model_info["output_dim"]
         device  ="cuda" if torch.cuda.is_available() else "cpu"
         arm_net = ContextNet(5, args.n_context_channels,
                                  hidden_dim=args.cml_hidden_dim, kernel_size=5, use_running_stats=args.adapt_bn).to(device)
-    else:
-        arm_net = None
+    
     if arm_net!=None:
         if args.precision == "fp32" or args.gpu is None:
             convert_models_to_fp32(arm_net)
@@ -123,11 +126,13 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         if args.distributed:
             arm_net = torch.nn.parallel.DistributedDataParallel(arm_net, device_ids=[args.gpu])
         
+        
     if "arm" in args.method:
-        if args.batch_size % args.meta_batch_size != 0:
+        if args.batch_size % args.meta_batch_size_train != 0 and args.batch_size_eval % args.meta_batch_size_eval != 0:
             raise ValueError("batch_size must be divisible by meta_batch_size")
         else:
-            args.support_size = int(args.batch_size / args.meta_batch_size)
+            args.support_size_train = int(args.batch_size / args.meta_batch_size_train)
+            args.support_size_eval = int(args.batch_size_eval / args.meta_batch_size_eval)
 
     print("Before data")
     data = get_data(args)
@@ -220,12 +225,12 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
 
     #if we have a validation set
     if args.train_file is None:
-        evaluate(model, data, start_epoch, args, writer, 0, arm_net=arm_net)
+        evaluate(model, data, start_epoch, args, writer, 0, arm_net=arm_net, inner_opt=inner_opt)
         return
     #else training
-    elif start_epoch == 0 and (args.val_file is not None or args.test_indices is not None):
+    elif start_epoch == 0 and  args.val_indices is not None:
         print("Evaluating")
-        evaluate(model, data, 0, args, writer, 0, arm_net=arm_net)
+        evaluate(model, data, 0, args, writer, 0, arm_net=arm_net, inner_opt=inner_opt)
     # print("Before train")
     if is_master(args) or not args.distributed:
         prev_best_loss = np.inf
@@ -237,10 +242,10 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
 
         # print("len data")
         # print(len(data["train"].dataloader.dataset))
-        train(model, data, epoch, optimizer, scheduler, args, writer, arm_net=arm_net)
+        train(model, data, epoch, optimizer, scheduler, args, writer, arm_net=arm_net, inner_opt=inner_opt)
         steps = data["train"].dataloader.num_batches * (epoch + 1)
-        if (args.val_file is not None or args.test_indices is not None):
-            loss = evaluate(model, data, epoch + 1, args, writer, steps, arm_net=arm_net)
+        if args.val_indices:
+            loss = evaluate(model, data, epoch + 1, args, writer, steps, arm_net=arm_net, inner_opt=inner_opt)
 
         if args.distributed:
             device = torch.device("cuda", args.gpu) if torch.cuda.is_available() else torch.device("cpu")

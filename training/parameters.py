@@ -23,10 +23,10 @@ def parse_args():
         help="Path to csv file with training data, including data and filepaths",
     )
     parser.add_argument(
-        "--val-file",
-        type=str,
-        default=None,
-        help="Path to csv file with validation data, including data and filepaths",
+        "--add-val",
+        type=bool,
+        default=True,
+        help="Wether to add a validation set",
     )
     parser.add_argument(
         "--split-type",
@@ -35,12 +35,7 @@ def parse_args():
         help="How the train-file is split in cross-validation",
         choices = ["random", "seperated", "stratified"]
     )
-    parser.add_argument(
-        "--add-val",
-        type=bool,
-        default=False,
-        help="Whether to add a validation file"
-    )
+
     parser.add_argument(
         "--mapping",
         type=str,
@@ -153,11 +148,18 @@ def parse_args():
     parser.add_argument('--adapt-bn', type=bool, default=False,
         help="Whether to adapt the batch norms in ARMCML")
     parser.add_argument(
-        "--meta-batch-size",
+        "--meta-batch-size-train",
         type=int,
         default=2,
         help="How many different meta batche are in a batch"
     )
+    parser.add_argument(
+        "--meta-batch-size-val",
+        type=int,
+        default=1,
+        help="How many different meta batche are in a batch"
+    )
+
     parser.add_argument(
         "--inner-lr",
         type=float,

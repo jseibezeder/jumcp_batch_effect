@@ -27,7 +27,7 @@ def marginal_entropy(outputs):
     avg_logits = torch.clamp(avg_logits, min=min_real)
     return -(avg_logits * torch.exp(avg_logits)).sum(dim=-1), avg_logits
 
-def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=None):
+def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=None, inner_opt=None):
     if args.method == "erm":
         if not is_train:
             model.eval()
@@ -94,7 +94,6 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
         loss = []
         base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
         base_model.train()
-        inner_opt = torch.optim.SGD(base_model.parameters(), lr=args.inner_lr)
         for domain_id in range(n_domains):
             start = domain_id*args.support_size
             end = start + args.support_size
@@ -151,7 +150,6 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
 
 
                 aug_inputs = torch.stack([augment_and_mix(x_ind, seed=args.seed) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
-                print(aug_inputs)
                 for _ in range(args.memo_steps):
                     logits = model(aug_inputs)
                     memo_opt.zero_grad()
@@ -180,7 +178,7 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
     
         return pred, loss
 
-def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_net = None):
+def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_net = None, inner_opt=None):
     os.environ["WDS_EPOCH"] = str(epoch)
 
     gc.collect()
@@ -204,17 +202,12 @@ def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_ne
     if args.distributed and sampler is not None:
         sampler.set_epoch(epoch)
 
-    """#TODO: fix percentage
-    if args.method == "erm":
-        num_batches_per_epoch = dataloader.num_batches
-    else:
-        num_batches_per_epoch = int(dataloader.num_batches/args.world_size)"""
     num_batches_per_epoch = dataloader.num_batches
 
     end = time.time()
     optimizer.zero_grad()
     for i, batch in enumerate(dataloader):
-        
+
 
         imgs, labels, _, metadata = batch
         
@@ -234,7 +227,8 @@ def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_ne
                                         args, 
                                         loss_fn=loss_fn, 
                                         labels=labels,
-                                        arm_net=arm_net)
+                                        arm_net=arm_net,
+                                        inner_opt=inner_opt)
         #torch.autograd.set_detect_anomaly(True)
         if args.method != "armll":
             total_loss.backward()
@@ -282,7 +276,7 @@ def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_ne
                     tb_writer.add_scalar(name, val, timestep)
 
 
-def evaluate(model, data, epoch, args, tb_writer=None, steps=None, arm_net = None):
+def evaluate(model, data, epoch, args, tb_writer=None, steps=None, arm_net = None, inner_opt=None):
     
     if not is_master(args):
         return 
@@ -318,7 +312,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None, arm_net = Non
             images = images.half()
             #labels = labels.half()
 
-        features, loss = predict_and_loss(base_model,images,args, is_train=False, loss_fn=loss_fn, labels=labels, arm_net=base_arm_net)
+        features, loss = predict_and_loss(base_model,images,args, is_train=False, loss_fn=loss_fn, labels=labels, arm_net=base_arm_net,inner_opt=inner_opt)
 
         batch_size = len(images)
         cumulative_loss += loss * batch_size

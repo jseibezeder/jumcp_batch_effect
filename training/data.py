@@ -4,7 +4,7 @@ import os
 import tifffile as tiff
 import json
 from torch.utils.data.distributed import DistributedSampler
-from training.sampler import DistributedGroupSampler
+from training.sampler import DistributedGroupSampler, GroupSampler
 from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize, RandomResizedCrop, InterpolationMode, RandomCrop, RandomRotation
 from dataclasses import dataclass
 import numpy as np
@@ -106,11 +106,8 @@ class DataInfo:
     sampler: DistributedSampler
 
 def get_jumcp_data(args, is_train):
-    if args.train_indices is not None:
-        file = args.train_file
-        
-    else:
-        file = args.train_file if is_train else args.val_file
+
+    file = args.train_file
     folder = args.image_path
 
     #create transform function
@@ -137,8 +134,8 @@ def get_jumcp_data(args, is_train):
 
     if args.train_indices is not None and is_train:
         dataset = CustomSubset(dataset, args.train_indices)
-    elif args.test_indices is not None and not is_train:
-        dataset = CustomSubset(dataset, args.test_indices)
+    elif args.val_indices is not None and not is_train:
+        dataset = CustomSubset(dataset, args.val_indices)
 
     num_samples = len(dataset)
     batch_size = args.batch_size if is_train else args.batch_size_eval
@@ -156,11 +153,18 @@ def get_jumcp_data(args, is_train):
             drop_last=is_train
         )
     elif "arm" in args.method:
-        sampler = DistributedGroupSampler(dataset, 
-                                          meta_batch_size=args.meta_batch_size,
-                                          support_size=args.support_size,
-                                          seed=args.seed,
-                                          distributed = args.distributed)
+        if is_train:
+            sampler = DistributedGroupSampler(dataset, 
+                                            meta_batch_size=args.meta_batch_size,
+                                            support_size=args.support_size,
+                                            seed=args.seed,
+                                            distributed = args.distributed)
+        else:
+            sampler = GroupSampler(dataset,
+                                   meta_batch_size=args.meta_batch_size_eval,
+                                   support_size=args.support_size_eval,
+                                   drop_last=is_train
+                                   )
         dataloader = DataLoader(
             dataset,
             num_workers=args.workers,
@@ -179,7 +183,7 @@ def get_data(args):
 
     if args.train_file:
         data["train"] = get_jumcp_data(args, is_train=True)
-    if args.val_file or args.test_indices is not None:
+    if args.val_indices is not None:
         data["val"] = get_jumcp_data(args, is_train=False)
 
     return data
@@ -293,13 +297,9 @@ def create_datasplits(args, seed_id=1234):
         unique_batches = table["Metadata_Batch"].unique()
         train_batches, test_batches = train_test_split(unique_batches, test_size=1/args.cross_validation, random_state=seed_id)
         
-        """temp_table = table[table["Metadata_Batch"].isin(train_batches)]
-        test_table = table[table["Metadata_Batch"].isin(test_batches)]
         if args.add_val:
-            #TODO: what test size?
-            train_table, val_table = train_test_split(temp_table, test_size=1/8, random_state=seed_id)
-        else:
-            train_table = temp_table"""
+            train_batches, val_batches = train_test_split(train_batches, test_size=1/7, random_state=seed_id)
+            val_idx = table.index[table["Metadata_Batch"].isin(val_batches)].tolist()
 
         train_idx = table.index[table["Metadata_Batch"].isin(train_batches)].tolist()
         test_idx  = table.index[table["Metadata_Batch"].isin(test_batches)].tolist()
@@ -322,8 +322,9 @@ def create_datasplits(args, seed_id=1234):
 
 
 if __name__=="__main__":
-    filename = "/system/user/studentwork/seibezed/bachelor/data/random_seed1234_train.csv"
+    filename = "/system/user/publicwork/sanchez/datasets/jumpcp-indices/indices/source_3_filtered_good_batches.pq"
     a = JUMPCPDataset(filename,"/system/user/publicdata/jumpcp/", "/system/user/studentwork/seibezed/bachelor/data/class_mapping.json")
 
-    print(a[0])
+    print(len(a))
+
     
