@@ -236,8 +236,7 @@ class DistributedGroupSampler(Sampler[_T_co]):
         seed: int = 1234,
         distributed: bool = True
     ) -> None:
-        
-        #DDP relevant
+
         if distributed:
             if num_replicas is None:
                 if not dist.is_available():
@@ -305,8 +304,6 @@ class DistributedGroupSampler(Sampler[_T_co]):
         else:
             # Sample groups according to the size of the group
             sampled_groups = rng.choice(self.groups, size=(self.total_batches, self.meta_batch_size), p=self.group_prob)
-
-        group_sizes = np.zeros(sampled_groups.shape)
 
         all_grouped_batches = np.zeros((self.total_batches, self.batch_size))
 

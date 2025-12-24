@@ -5,7 +5,7 @@ import tifffile as tiff
 import json
 from torch.utils.data.distributed import DistributedSampler
 from training.sampler import DistributedGroupSampler, GroupSampler
-from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize, RandomResizedCrop, InterpolationMode, RandomCrop, RandomRotation
+from torchvision.transforms import Compose, Resize, CenterCrop, Normalize, RandomResizedCrop, InterpolationMode, RandomCrop, RandomRotation
 from dataclasses import dataclass
 import numpy as np
 import torch
@@ -31,7 +31,6 @@ class JUMPCPDataset(Dataset):
         #"Metadata_JCP2022" for applied compound, this is important for classification
         #additionally: "Metadata_Source" for which lab, "Metadata_Batch" for which batch
 
-        #table = pd.read_csv(data_file)
         table = pq.read_table(data_file).to_pandas().reset_index(drop=True)
 
         with open(class_mapping, "r") as f:
@@ -155,8 +154,8 @@ def get_jumcp_data(args, is_train):
     elif "arm" in args.method:
         if is_train:
             sampler = DistributedGroupSampler(dataset, 
-                                            meta_batch_size=args.meta_batch_size,
-                                            support_size=args.support_size,
+                                            meta_batch_size=args.meta_batch_size_train,
+                                            support_size=args.support_size_train,
                                             seed=args.seed,
                                             distributed = args.distributed)
         else:
@@ -257,11 +256,7 @@ class CustomSubset(Dataset[T_co]):
         self.group_counts = np.array([
         np.sum(self.group_ids == g) for g in self.groups
         ])
-        
-        """self.group_counts, _ = np.histogram(self.group_ids,
-                                            bins=range(self.n_groups + 1),
-                                            density=False)
-"""
+
     def __getitem__(self, idx):
         if isinstance(idx, list):
             return self.dataset[[self.indices[i] for i in idx]]
@@ -269,7 +264,6 @@ class CustomSubset(Dataset[T_co]):
 
     def __getitems__(self, indices: List[int]) -> List[T_co]:
         # add batched sampling support when parent dataset supports it.
-        # see torch.utils.data._utils.fetch._MapDatasetFetcher
         if callable(getattr(self.dataset, "__getitems__", None)):
             return self.dataset.__getitems__([self.indices[idx] for idx in indices])  # type: ignore[attr-defined]
         else:
@@ -282,8 +276,9 @@ def create_datasplits(args, seed_id=1234):
     #function used to create the datasplit file for training validation and testing
     #the data is split into roughly 70% training, 10% validation and 20% testing
     #there are two types of spliting:
-    #   "stratified": this ensures that data from each site and batch are present in trainand test sets
+    #   "stratified": this ensures that data from each site and batch are present in trainand val test sets
     #   "seperated": with this a whole batch(site) is not present in both training and testing 
+    #   "random": random split for train val test 
 
     table = pq.read_table(args.train_file).to_pandas().reset_index(drop=True)
     
@@ -298,7 +293,7 @@ def create_datasplits(args, seed_id=1234):
         train_batches, test_batches = train_test_split(unique_batches, test_size=1/args.cross_validation, random_state=seed_id)
         
         if args.add_val:
-            train_batches, val_batches = train_test_split(train_batches, test_size=1/7, random_state=seed_id)
+            train_batches, val_batches = train_test_split(train_batches, test_size=args.val_size, random_state=seed_id)
             val_idx = table.index[table["Metadata_Batch"].isin(val_batches)].tolist()
 
         else: val_idx = None
@@ -312,7 +307,7 @@ def create_datasplits(args, seed_id=1234):
         train_idx, test_idx = train_test_split(table, test_size=1/args.cross_validation, random_state=seed_id)
         if args.add_val:
             #TODO: what test size?
-            train_idx, val_idx = train_test_split(train_idx, test_size=2/3, random_state=seed_id)
+            train_idx, val_idx = train_test_split(train_idx, test_size=args.val_size, random_state=seed_id)
         else:
             val_idx = None
 

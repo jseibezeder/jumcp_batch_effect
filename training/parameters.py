@@ -10,6 +10,9 @@ def get_default_params(model_name):
 
 def parse_args():
     parser = argparse.ArgumentParser()
+
+    ######################## General Arguments ###########################
+
     parser.add_argument(
         "--image-path",
         type=str,
@@ -22,19 +25,7 @@ def parse_args():
         default=None,
         help="Path to csv file with training data, including data and filepaths",
     )
-    parser.add_argument(
-        "--add-val",
-        type=bool,
-        default=True,
-        help="Wether to add a validation set",
-    )
-    parser.add_argument(
-        "--split-type",
-        type=str,
-        default="seperated",
-        help="How the train-file is split in cross-validation",
-        choices = ["random", "seperated", "stratified"]
-    )
+    
 
     parser.add_argument(
         "--mapping",
@@ -56,8 +47,76 @@ def parse_args():
         default=None,
         help="Optional identifier for the experiment when storing logs. Otherwise use current time.",
     )
+    parser.add_argument("--seed", default=1234, type=int, help="Seed for reproducibility")
+    ######################## Data relevant ###########################
     parser.add_argument(
         "--workers", type=int, default=1, help="Number of workers per GPU."
+    )
+    parser.add_argument(
+        "--image-resolution-train",
+        default= 499,
+        nargs='+',
+        type=int,
+        help="In DP, which GPUs to use for multigpu training",
+    )
+    parser.add_argument(
+        "--image-resolution-val",
+        default= 499,
+        nargs='+',
+        type=int,
+        help="In DP, which GPUs to use for multigpu training",
+    )
+    parser.add_argument(
+        "--normalize",
+        choices=["dataset", "img", "None"],
+        default="dataset",
+        help="Choice of method (default: dataset)"
+    )
+    parser.add_argument(
+        "--batchnorm",
+        default="True",
+        action="store_false",
+        help="Choice of method (default: dataset)"
+    )
+    parser.add_argument(
+        "--preprocess-img",
+        choices=["crop", "downsize", "rotate", "None"],
+        default="crop",
+        help="Choice of method (default: dataset)"
+    )
+    parser.add_argument(
+        "--add-val",
+        type=bool,
+        default=True,
+        help="Wether to add a validation set",
+    )
+    parser.add_argument(
+        "--split-type",
+        type=str,
+        default="seperated",
+        help="How the train-file is split in cross-validation",
+        choices = ["random", "seperated", "stratified"]
+    )
+    parser.add_argument(
+        "--val-size",
+        default= 1/7,
+        type=float,
+        help="What percentage of train set is validation data"
+    )
+    ######################## Learning parameters ###########################
+    parser.add_argument(
+        "--cross-validation",
+        default= 1,
+        type=int,
+        help="If >1, how many folds to use for cross validation, else standard training"
+    )
+    
+
+    parser.add_argument(
+        "--model",
+        choices=["ResNet50"],
+        default="ResNet50",
+        help="Name of the model used for training",
     )
     parser.add_argument(
         "--batch-size", type=int, default=64, help="Batch size per GPU."
@@ -101,12 +160,7 @@ def parse_args():
         default=False,
         help="Use this flag to skip the learning rate decay.",
     )
-    parser.add_argument(
-        "--save-most-recent",
-        action="store_true",
-        default=False,
-        help="Always save the most recent model trained to epoch_latest.pt.",
-    )
+
     parser.add_argument(
         "--resume",
         default=None,
@@ -119,12 +173,34 @@ def parse_args():
         default="fp32",
         help="Floating point precition."
     )
+
+    ######################## Methods specific ###########################
     parser.add_argument(
         "--method",
         choices=["erm","armcml", "armbn", "armll", "memo"],
         default="erm",
         help="Method used for training the batch effect"
     )
+    parser.add_argument(
+        "--grad-acc",
+        type=int,
+        default=1,
+        help="Use gradient accumulation for models, defines after how many steps the gradients are accumulated"
+    )
+    parser.add_argument(
+        "--meta-batch-size-train",
+        type=int,
+        default=2,
+        help="How many different meta batche are in a batch"
+    )
+    parser.add_argument(
+        "--meta-batch-size-eval",
+        type=int,
+        default=1,
+        help="How many different meta batche are in a batch"
+    )
+
+    ############# ARM-CML ##################
     parser.add_argument(
         "--n-context-channels",
         type=int,
@@ -137,29 +213,13 @@ def parse_args():
         default=64,
         help="Size of hidden dimension in context network"
     )
-    parser.add_argument(
-        "--grad-acc",
-        type=int,
-        default=1,
-        help="Use gradient accumulation for models, defines after how many steps the gradients are accumulated"
-    )
+    
     parser.add_argument('--pret_add_channels', type=int, default=1,
         help="Size of hidden dimension in context network")
     parser.add_argument('--adapt-bn', type=bool, default=False,
         help="Whether to adapt the batch norms in ARMCML")
-    parser.add_argument(
-        "--meta-batch-size-train",
-        type=int,
-        default=2,
-        help="How many different meta batche are in a batch"
-    )
-    parser.add_argument(
-        "--meta-batch-size-val",
-        type=int,
-        default=1,
-        help="How many different meta batche are in a batch"
-    )
-
+    ############# ARM-LL ##################
+    
     parser.add_argument(
         "--inner-lr",
         type=float,
@@ -172,6 +232,7 @@ def parse_args():
         default=1,
         help="Parameter for learned loss ARM algorithm"
     )
+    ############# MEMO ##################
     parser.add_argument(
         "--k-augmentations",
         type=int,
@@ -197,13 +258,8 @@ def parse_args():
         help="Determine strength of BatchNorms2d on memo prediction"
     )
 
-    parser.add_argument(
-        "--model",
-        choices=["ResNet50"],
-        default="ResNet50",
-        help="Name of the model used for training",
-    )
-    # arguments for distributed training
+    
+    ######################## Distributed Training ###########################
     parser.add_argument(
         "--dist-url",
         default="tcp://127.0.0.1:6100",
@@ -236,47 +292,10 @@ def parse_args():
         action="store_true",
         help="If true, only subset of data is used."
     )
-    parser.add_argument(
-        "--image-resolution-train",
-        default= 499,
-        nargs='+',
-        type=int,
-        help="In DP, which GPUs to use for multigpu training",
-    )
-    parser.add_argument(
-        "--image-resolution-val",
-        default= 499,
-        nargs='+',
-        type=int,
-        help="In DP, which GPUs to use for multigpu training",
-    )
-    parser.add_argument(
-        "--normalize",
-        choices=["dataset", "img", "None"],
-        default="dataset",
-        help="Choice of method (default: dataset)"
-    )
-    parser.add_argument(
-        "--batchnorm",
-        default="True",
-        action="store_false",
-        help="Choice of method (default: dataset)"
-    )
-    parser.add_argument(
-        "--preprocess-img",
-        choices=["crop", "downsize", "rotate", "None"],
-        default="crop",
-        help="Choice of method (default: dataset)"
-    )
-    parser.add_argument(
-        "--cross-validation",
-        default= 1,
-        type=int,
-        help="If >1, how many folds to use for cross validation, else standard training"
-    )
     
+   
 
-    parser.add_argument("--seed", default=1234, type=int, help="Seed for reproducibility")
+    
 
     args = parser.parse_args()
     args.aggregate = not args.skip_aggregate

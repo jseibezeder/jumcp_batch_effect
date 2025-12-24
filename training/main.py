@@ -60,7 +60,6 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         logging.info(f"Use GPU: {args.gpu} for training")
         torch.cuda.set_device(args.gpu)
 
-    #TODO: change on how to load model
     model_config_file = Path(__file__).parent / "model_parameter"/ f"{args.model.replace('/', '-')}.json"
     print('Loading model from', model_config_file)
     assert os.path.exists(model_config_file)
@@ -71,14 +70,12 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         model_info["input_shape"] += args.n_context_channels
 
     #issue on how we predict and backpropagate, since when predicting we predict per sub meta-batch
-    #but when using Automatic mixed precision the backward step failed, since we had differnent versions
-    #of the batch statistics
+    #but the backward step failed, since we had differnent versions of the batch statistics
+    #TODO: check if really set to false for armcml
     if args.method == "armbn" or (args.method == "armcml" and args.adapt_bn):
         model_info["use_batch_running"] = False
 
-    #print("Start")
     model = ResNet(**model_info)
-    #print("Model created")
 
     # See https://discuss.pytorch.org/t/valueerror-attemting-to-unscale-fp16-gradients/81372
     if args.precision == "fp32" or args.gpu is None:
@@ -161,6 +158,8 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             ]
         if args.method == "armll":
             params.append({"params": arm_net.parameters()}) 
+
+        #define optimizer
         optimizer = optim.AdamW(
             params,
             lr=args.lr,
@@ -240,8 +239,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         if args.gpu == 0:
             logging.info(f'Start epoch {epoch}')
 
-        # print("len data")
-        # print(len(data["train"].dataloader.dataset))
+
         train(model, data, epoch, optimizer, scheduler, args, writer, arm_net=arm_net, inner_opt=inner_opt)
         steps = data["train"].dataloader.num_batches * (epoch + 1)
         if args.val_indices:
@@ -260,7 +258,6 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                 counter += 1
 
             if counter > args.patience:
-            #if True:
                 early_stop += 1
 
 
@@ -283,31 +280,23 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
 
 
         if args.distributed:
-            #logging.info("waiting")
             dist.barrier()
-            #logging.info("Send early stop")
             dist.all_reduce(early_stop, op=dist.ReduceOp.SUM)
-            #logging.info("recieve early stop")
-            #logging.info(f"early stop signal: {early_stop}")
 
-        # now every process checks the same flag
         if early_stop == 1:
             logging.info("Stopped early")
             break
 
 def main():
     args = parse_args()
-    # Set the seed and try to make everything as deterministic as possible
+    # Set seeds
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-    #load model configs
-    #default model RN50
+    #check if model configs exist
     model_config_file = Path(__file__).parent / f"model_parameter/{args.model.replace('/', '-')}.json"
     assert os.path.exists(model_config_file)
-    with open(model_config_file, 'r') as f:
-        model_info = json.load(f)
 
     img_res_str = str(args.image_resolution_train)
 
@@ -319,7 +308,6 @@ def main():
 
     # get the name of the experiments
     if args.name is None:
-        #TODO: change name, and add names for later us
         args.name = strftime(
             f"method={args.method}_"
             f"imgres={img_res_str}_"
@@ -342,13 +330,7 @@ def main():
         )
         return -1
 
-    print(f'Logging to {args.log_path}')
-
-        #setup some parameters for model, wandb/tensorboard
-
     assert args.precision in ['fp16', 'fp32']
-    # assert args.model in ['RN50', 'RN101', 'RN50x4', 'ViT-B/32'] or os.path.exists(args.model)
-
 
     torch.multiprocessing.set_start_method("spawn", force=True)
 

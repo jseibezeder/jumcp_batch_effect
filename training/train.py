@@ -4,8 +4,6 @@ import torch.nn as nn
 import math
 import os
 import gc
-from pathlib import Path
-import json
 import time
 import logging
 import higher
@@ -28,6 +26,13 @@ def marginal_entropy(outputs):
     return -(avg_logits * torch.exp(avg_logits)).sum(dim=-1), avg_logits
 
 def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=None, inner_opt=None):
+    if is_train:
+        meta_batch_size = args.meta_batch_size_train
+        support_size = args.support_size_train
+    else:
+        meta_batch_size = args.meta_batch_size_eval
+        support_size = args.support_size_eval
+
     if args.method == "erm":
         if not is_train:
             model.eval()
@@ -39,37 +44,41 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
     
         return pred, loss
     
+
+    
     elif args.method == "armcml":
         batch_size, c, h, w = x.shape
         if args.adapt_bn:
             out = []
-            for i in range(args.meta_batch_size):
-                x_i = x[i*args.support_size:(i+1)*args.support_size]
+            for i in range(meta_batch_size):
+                x_i = x[i*support_size:(i+1)*support_size]
                 context_i = arm_net(x_i)
-                context_i = context_i.mean(dim=0).expand(args.support_size, -1, -1, -1)
+                context_i = context_i.mean(dim=0).expand(support_size, -1, -1, -1)
                 x_i = torch.cat([x_i, context_i], dim=1)
                 out.append(model(x_i))
             logits = torch.cat(out)
         else:
-            context = arm_net(x) # Shape: batch_size, channels, H, W
-            context = context.reshape((args.meta_batch_size, args.support_size, args.n_context_channels, h, w))
-            context = context.mean(dim=1) # Shape: meta_batch_size, self.n_context_channels
-            context = torch.repeat_interleave(context, repeats=args.support_size, dim=0) # meta_batch_size * support_size, context_size
+            context = arm_net(x)
+            context = context.reshape((meta_batch_size, support_size, args.n_context_channels, h, w))
+            context = context.mean(dim=1) 
+            context = torch.repeat_interleave(context, repeats=support_size, dim=0)
             x = torch.cat([x, context], dim=1)
             logits = model(x)
         
         loss = loss_fn(logits, labels)
         return logits.detach().cpu(), loss
 
-    
+
+
+
     elif args.method == "armbn":
         model.train()
 
-        n_domains = math.ceil(len(x) / args.support_size)
+        n_domains = math.ceil(len(x) / support_size)
         logits = []
         for domain_id in range(n_domains):
-            start = domain_id * args.support_size
-            end = start + args.support_size
+            start = domain_id * support_size
+            end = start + support_size
             end = min(len(x), end) # in case final domain has fewer than support size samples
             domain_x = x[start:end]
             if is_train:
@@ -85,18 +94,23 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
 
         return logits, loss
     
+
+
+
+
+    
     elif args.method == "armll":
         model.train()
         arm_net.train()
 
-        n_domains = math.ceil(len(x) / args.support_size)
+        n_domains = math.ceil(len(x) / support_size)
         logits = []
         loss = []
         base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
         base_model.train()
         for domain_id in range(n_domains):
-            start = domain_id*args.support_size
-            end = start + args.support_size
+            start = domain_id*support_size
+            end = start + support_size
             end = min(len(x), end) # in case final domain has fewer than support size samples
 
             domain_x = x[start:end]
@@ -115,27 +129,26 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
                 
                 domain_logits = fnet(domain_x)
                 logits.append(domain_logits.detach().cpu())
-                #if backprop_loss and labels is not None:
                 domain_labels = labels[start:end]
                 domain_loss = loss_fn(domain_logits, domain_labels)
                 if is_train and labels is not None:
                     domain_loss.backward()
                 loss.append(domain_loss.to('cpu').detach().item())
-            #have to delete, since if not some compuational graphs leak and an OutOfMemory(OOM) error occurs
-            #del spt_logits, spt_loss, domain_logits, domain_loss
-            #torch.cuda.empty_cache()
+
 
         logits = torch.cat(logits)
 
-        #TODO:
         return logits, np.mean(loss)
         
+
+
+
+
     elif args.method == "memo":
         if is_train:
             pred = model(x)
 
         else:
-            #original_state = deepcopy(model.state_dict())
             orig_params = [p.detach().clone() for p in model.parameters()]
             pred = []
 
@@ -158,7 +171,6 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
                     
                     loss.backward()
                     memo_opt.step()
-                nn.BatchNorm2d.prior = 1
 
                 if args.prior_strength < 0:
                     nn.BatchNorm2d.prior = 1
@@ -166,7 +178,6 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
                     nn.BatchNorm2d.prior = float(args.prior_strength) / float(args.prior_strength + 1)
                 with torch.no_grad():
                     pred.append(model(x_ind.unsqueeze(0)))
-                #model.load_state_dict(original_state)
                 with torch.no_grad():
                     for p, orig in zip(model.parameters(), orig_params):
                         p.copy_(orig)
@@ -178,13 +189,13 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
     
         return pred, loss
 
+
+
 def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_net = None, inner_opt=None):
     os.environ["WDS_EPOCH"] = str(epoch)
 
     gc.collect()
     torch.cuda.empty_cache()
-
-
 
     model.train()
     dataloader, sampler = data['train'].dataloader, data['train'].sampler
@@ -192,9 +203,6 @@ def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_ne
 
     loss_fn = nn.CrossEntropyLoss()
 
-    model_config_file = Path(__file__).parent / f"model_parameter/{args.model.replace('/', '-')}.json"
-    with open(model_config_file, 'r') as f:
-        model_info = json.load(f)
 
     if args.gpu is not None:
         loss_fn = loss_fn.cuda(args.gpu)
@@ -229,15 +237,9 @@ def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_ne
                                         labels=labels,
                                         arm_net=arm_net,
                                         inner_opt=inner_opt)
-        #torch.autograd.set_detect_anomaly(True)
         if args.method != "armll":
             total_loss.backward()
 
-        """if args.method == "armll":
-            if (i+1)%8==0:
-                optimizer.step()
-        else:
-            optimizer.step()"""
         if (i+1)%args.grad_acc == 0:
             optimizer.step()
             optimizer.zero_grad()
@@ -281,14 +283,9 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None, arm_net = Non
     if not is_master(args):
         return 
 
-    #model.eval()
-
     dataloader = data['val'].dataloader
 
     loss_fn = nn.CrossEntropyLoss()
-    model_config_file = Path(__file__).parent / f"model_parameter/{args.model.replace('/', '-')}.json"
-    with open(model_config_file, 'r') as f:
-            model_info = json.load(f)
 
     if args.gpu is not None:
         loss_fn = loss_fn.cuda(args.gpu)
@@ -337,10 +334,6 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None, arm_net = Non
         for name, val in {"loss": loss, "accuracy": acc}.items():
             if tb_writer is not None:
                 tb_writer.add_scalar(f"val/{name}", val, epoch)
-    """if args.save_logs:
-        with open(os.path.join(args.checkpoint_path, "results.jsonl"), "a+") as f:
-        f.write(json.dumps(metrics))
-        f.write("\n")"""
-    
+  
     return loss
 
