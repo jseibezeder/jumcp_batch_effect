@@ -301,11 +301,11 @@ def create_datasplits(args, seed_id=1234):
             train_batches, val_batches = train_test_split(train_batches, test_size=1/7, random_state=seed_id)
             val_idx = table.index[table["Metadata_Batch"].isin(val_batches)].tolist()
 
+        else: val_idx = None
+
         train_idx = table.index[table["Metadata_Batch"].isin(train_batches)].tolist()
         test_idx  = table.index[table["Metadata_Batch"].isin(test_batches)].tolist()
-        if args.add_val:
-            train_idx, val_idx = train_test_split(train_idx, test_size=1/8, random_state=seed_id)
-        else: val_idx = None
+
 
     elif args.split_type == "random":
         #split randomly
