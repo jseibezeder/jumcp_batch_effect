@@ -184,30 +184,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                                                                            start_restarts=steps_per_epoch*args.start_restart,
                                                                            restarts_multiplication=args.restart_mul)
 
-    # optionally resume from a checkpoint
-    start_epoch = 0
-    if args.resume is not None:
-        if os.path.isfile(args.resume):
-            if args.gpu is None:
-                checkpoint = torch.load(args.resume)
-            else:
-                # Map model to be loaded to specified single gpu.
-                loc = "cuda:{}".format(args.gpu)
-                checkpoint = torch.load(args.resume, map_location=loc)
-            start_epoch = checkpoint["epoch"]
-            sd = checkpoint["state_dict"]
-            if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
-                sd = {k[len('module.'):]: v for k, v in sd.items()}
-            model.load_state_dict(sd)
-            if optimizer is not None:
-                optimizer.load_state_dict(checkpoint["optimizer"])
-            if scheduler is not None and "scheduler" in checkpoint:
-                scheduler.load_state_dict(checkpoint["scheduler"])
-            logging.info(
-                f"=> loaded checkpoint '{args.resume}' (epoch {checkpoint['epoch']})"
-            )
-        else:
-            logging.info("=> no checkpoint found at '{}'".format(args.resume))
+    
 
     cudnn.benchmark = True
     cudnn.deterministic = False
@@ -221,6 +198,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     if args.save_logs and args.tensorboard:
         writer = SummaryWriter(args.tensorboard_path)
 
+    start_epoch = 0
 
     #if we have a validation set
     if args.train_file is None:
@@ -310,17 +288,16 @@ def main():
     if args.name is None:
         args.name = strftime(
             f"method={args.method}_"
+            f"preprocess={args.preprocess_img}_"
             f"imgres={img_res_str}_"
             f"lr={args.lr}_"
             f"wd={args.wd}_"
-            f"agg={args.aggregate}_"
             f"model={args.model}_"
             f"world_size={args.world_size}"
             f"batchsize={args.batch_size}_workers={args.workers}_date=%Y-%m-%d-%H-%M-%S_",
             gmtime()
         )
-        if args.debug_run:
-            args.name += '_DEBUG'
+
 
     #use for logging
     args.log_path = os.path.join(args.logs, args.name, "out.log")
@@ -355,7 +332,7 @@ def main():
             if dirname:
                 os.makedirs(dirname, exist_ok=True)
 
-        fold_args.log_level = logging.DEBUG if fold_args.debug or fold_args.debug_run else logging.INFO
+        fold_args.log_level = logging.INFO
         log_queue = setup_primary_logging(fold_args.log_path, fold_args.log_level)
 
         if fold_args.distributed:

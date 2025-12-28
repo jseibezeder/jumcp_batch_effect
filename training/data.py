@@ -189,6 +189,7 @@ def get_data(args):
 
 def transform_function(n_px_tr: int, n_px_val: int, is_train: bool, normalize:str = "dataset", norm_coef: np.lib.npyio.NpzFile = None, preprocess:str = "downsize"):
     if normalize == "dataset":
+        raise NotImplementedError()
         mean = norm_coef["mean"]
         std = norm_coef["std"]
         normalize = Normalize(tuple(mean),tuple(std))

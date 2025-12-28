@@ -1,14 +1,11 @@
 #code from augmix
 
 import numpy as np
-from PIL import Image, ImageOps, ImageEnhance
 import random
 import torch
 import torchvision.transforms.functional as TF
-import torch.nn.functional as F
+import torchvision
 
-# ImageNet code should change this value
-IMAGE_SIZE = 499
 
 def int_parameter(level, maxval):
   """Helper function to scale `val` between 0 and maxval .
@@ -41,18 +38,39 @@ def float_parameter(level, maxval):
 def sample_level(n):
   return np.random.uniform(low=0.1, high=n)
 
-#new
 def autocontrast(img, _level):
-    # img: C×H×W in [0,1]
-    cmin = img.amin(dim=(1,2), keepdim=True)
-    cmax = img.amax(dim=(1,2), keepdim=True)
-    scale = (cmax - cmin).clamp(min=1e-5)
-    return (img - cmin) / scale
+    minimum = img.amin(dim=(-2, -1), keepdim=True)
+    maximum = img.amax(dim=(-2, -1), keepdim=True)
+    scale = 1 / (maximum - minimum)
+    eq_idxs = torch.isfinite(scale).logical_not()
+    minimum[eq_idxs] = 0
+    scale[eq_idxs] = 1
 
-#new
+    return ((img - minimum) * scale).clamp(0, 1).to(img.dtype)
+
+#TODO:
+def _scale_channel(img_chan) :
+    img = img_chan.clamp(0, 1)
+    hist = torch.histc(img, bins=256, min=0.0, max=1.0)
+    cdf = hist.cumsum(0)
+    cdf = cdf / cdf[-1]  # normalize to [0,1]
+
+    # Create bin centers
+    bin_edges = torch.linspace(0, 1, 256 + 1, device=img.device)
+
+    # Quantize image to bins
+    img_flat = img.reshape(-1)
+    bin_idx = torch.bucketize(img_flat, bin_edges, right=True) - 1
+    bin_idx = bin_idx.clamp(0, 256 - 1)
+
+    # LUT mapping via CDF
+    img_eq = cdf[bin_idx]
+
+    return img_eq.reshape(img.shape)
+
+
 def equalize(img, _level):
-    # img: C×H×W in [0,1]
-    C, H, W = img.shape
+    """C, H, W = img.shape
     out = torch.zeros_like(img)
     for c in range(C):
         flat = img[c].flatten()
@@ -62,59 +80,60 @@ def equalize(img, _level):
         lut = (cdf * 255).clamp(0,255).to(torch.int64)
         vals = (flat * 255).to(torch.int64)
         out[c] = (lut[vals].reshape(H,W).float() / 255.0)
-    return out
+    return out"""
+    #return TF.equalize(img)
+    return torch.stack([_scale_channel(img[c]) for c in range(img.size(0))])
 
-#new
 def posterize(img, level):
     bits = 4 - int_parameter(sample_level(level), 4)
-    shift = 8 - bits
-    return torch.floor(img * 255 / (2**shift)) * (2**shift) / 255
+    img = (img*255.0).to(torch.uint8)
 
-#new
+    mask = -int(2 ** (8 - bits))
+    return (img & mask).to(torch.float32) /255.0 
+
+
 def rotate(img, level):
     degrees = int_parameter(sample_level(level), 30)
     if random.random() > 0.5:
         degrees = -degrees
     return TF.rotate(img, degrees, interpolation=TF.InterpolationMode.BILINEAR)
 
-#new
 def solarize(img, level):
     threshold = 256 - int_parameter(sample_level(level), 256)
     return torch.where(img * 255 > threshold,
                        1.0 - img,
                        img)
-#new
+
 def shear_x(img, level):
     shear = float_parameter(sample_level(level), 0.3)
     if random.random() > 0.5:
         shear = -shear
+    shear = shear * 180 / torch.pi
     return TF.affine(img, angle=0, translate=[0,0], scale=1.0,
                      shear=[shear, 0.0],
                      interpolation=TF.InterpolationMode.BILINEAR)
 
-#new
 def shear_y(img, level):
     shear = float_parameter(sample_level(level), 0.3)
     if random.random() > 0.5:
         shear = -shear
+    shear = shear * 180 / torch.pi
     return TF.affine(img, angle=0, translate=[0,0], scale=1.0,
                      shear=[0.0, shear],
                      interpolation=TF.InterpolationMode.BILINEAR)
 
 
-#new
+
 def translate_x(img, level):
-    IMAGE_SIZE = img.shape[1]
-    shift = int_parameter(sample_level(level), IMAGE_SIZE // 3)
+    shift = int_parameter(sample_level(level), img.shape[-1]/ 3)
     if random.random() > 0.5:
         shift = -shift
     return TF.affine(img, angle=0, translate=[shift, 0], scale=1.0,
                      shear=[0.0, 0.0],
                      interpolation=TF.InterpolationMode.BILINEAR)
-#new
+
 def translate_y(img, level):
-    IMAGE_SIZE = img.shape[1]
-    shift = int_parameter(sample_level(level), IMAGE_SIZE // 3)
+    shift = int_parameter(sample_level(level), img.shape[-2]/ 3)
     if random.random() > 0.5:
         shift = -shift
     return TF.affine(img, angle=0, translate=[0, shift], scale=1.0,
@@ -122,67 +141,30 @@ def translate_y(img, level):
                      interpolation=TF.InterpolationMode.BILINEAR)
 
 
-# operation that overlaps with ImageNet-C's test set
-def color(img, level):
-    s = float_parameter(sample_level(level), 1.8) + 0.1
-    mean = img.mean(dim=0, keepdim=True)
-    return (img - mean) * s + mean
-
-
-# operation that overlaps with ImageNet-C's test set
-def contrast(img, level):
-    s = float_parameter(sample_level(level), 1.8) + 0.1
-    mean = img.mean()
-    return (img - mean) * s + mean
-
-
-# operation that overlaps with ImageNet-C's test set
-def brightness(img, level):
-    s = float_parameter(sample_level(level), 1.8) + 0.1
-    return img * s
-
-
-# operation that overlaps with ImageNet-C's test set
-def sharpness(img, level):
-    s = float_parameter(sample_level(level), 1.8) + 0.1
-
-    # Laplacian kernel
-    kernel = torch.tensor([
-        [0, -1,  0],
-        [-1, 5, -1],
-        [0, -1,  0]
-    ], dtype=img.dtype, device=img.device).unsqueeze(0).unsqueeze(0)
-
-    C = img.shape[0]
-    kernel = kernel.repeat(C, 1, 1, 1)
-    img_blur = F.conv2d(img.unsqueeze(0), kernel, padding=1, groups=C)
-    img_blur = img_blur.squeeze(0)
-
-    return img * (1 - s) + img_blur * s
-
-
 augmentations = [
     autocontrast, equalize, posterize, rotate, solarize, shear_x, shear_y,
     translate_x, translate_y
 ]
 
-augmentations_all = [
-    autocontrast, equalize, posterize, rotate, solarize, shear_x, shear_y,
-    translate_x, translate_y, color, contrast, brightness, sharpness
-]
-
-# CIFAR-10 constants
-#TODO: change for 
-MEAN = [0.4914, 0.4822, 0.4465]
-STD = [0.2023, 0.1994, 0.2010]
+#precomputed means of folds
+MEANS=[[0.0943, 0.0905, 0.1178, 0.0836, 0.0655],[0.0989, 0.0930, 0.1249, 0.0856, 0.0672], 
+       [0.0978, 0.0919, 0.1258, 0.0831, 0.0675],[0.0959, 0.0923, 0.1205, 0.0925, 0.0671],
+       [0.0967, 0.0941, 0.1208, 0.0896, 0.0687]]
+STDS=[[0.1187, 0.1094, 0.1123, 0.0848, 0.0982], [0.1217, 0.1116, 0.1148, 0.0859, 0.1011],
+      [0.1211, 0.1101, 0.1161, 0.0841, 0.0999], [0.1186, 0.1111, 0.1126, 0.0881, 0.0995],
+      [0.1193, 0.1122, 0.1128, 0.0868, 0.0995]]
 
 
-def normalize(image):
+def normalize(image, fold_id):
   """Normalize input image channel-wise to zero mean and unit variance."""
-  image = image.transpose(2, 0, 1)  # Switch to channel-first
-  mean, std = np.array(MEAN), np.array(STD)
+  normalize = torchvision.transforms.Normalize(
+    mean=MEANS[fold_id],
+    std=STDS[fold_id]
+  )
+  """mean, std = np.array(MEANS[fold_id]), np.array(STDS[fold_id])
   image = (image - mean[:, None, None]) / std[:, None, None]
-  return image.transpose(1, 2, 0)
+  return image"""
+  return normalize(image)
 
 
 def apply_op(image, op, severity):
@@ -192,7 +174,8 @@ def apply_op(image, op, severity):
     return augmented.clamp(0.0, 1.0)
 
 
-def augment_and_mix(image, severity=3, width=3, depth=-1, alpha=1., seed=1234):
+
+def augment_and_mix(image, severity=3, width=3, depth=-1, alpha=1., seed=1234, fold_id = None):
   """Perform AugMix augmentations and compute mixture.
 
   Args:
@@ -206,12 +189,12 @@ def augment_and_mix(image, severity=3, width=3, depth=-1, alpha=1., seed=1234):
   Returns:
     mixed: Augmented and mixed image.
   """
-  np.random.seed(seed)
-  torch.manual_seed(seed)
+  
   
   ws = torch.distributions.Dirichlet(torch.ones(width) * alpha).sample().to(image.device)
   m  = torch.distributions.Beta(alpha, alpha).sample().to(image.device)
 
+  img_pre = normalize(image, fold_id)
   mix = torch.zeros_like(image)
   for i in range(width):
     image_aug = image.clone()
@@ -220,13 +203,10 @@ def augment_and_mix(image, severity=3, width=3, depth=-1, alpha=1., seed=1234):
       op = np.random.choice(augmentations)
       image_aug = apply_op(image_aug, op, severity)
     # Preprocessing commutes since all coefficients are convex
-    #mix += ws[i] * normalize(image_aug)
-    mix += ws[i] * image_aug
+    mix += ws[i] * normalize(image_aug, fold_id)
+#TODO: write like memo
 
   #mixed = (1 - m) * normalize(image) + m * mix
-  mixed = (1 - m) * image + m * mix
-    # If you want it to *require* grad (but graph is broken before this point):
-  #mixed.requires_grad_(True)
+  mixed = m * img_pre + (1 - m) * mix
+
   return mixed
-
-

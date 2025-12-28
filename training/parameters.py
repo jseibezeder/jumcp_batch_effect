@@ -48,7 +48,7 @@ def parse_args():
         help="Optional identifier for the experiment when storing logs. Otherwise use current time.",
     )
     parser.add_argument("--seed", default=1234, type=int, help="Seed for reproducibility")
-    ######################## Data relevant ###########################
+    ######################## Data parameters ###########################
     parser.add_argument(
         "--workers", type=int, default=1, help="Number of workers per GPU."
     )
@@ -151,7 +151,7 @@ def parse_args():
         "--gpu",
         type=int,
         default=None,
-        help="Specify a single GPU to run the code on for debugging."
+        help="Specify a single GPU to run the code on."
         "Leave at None to use all available GPUs.",
     )
     parser.add_argument(
@@ -159,13 +159,6 @@ def parse_args():
         action="store_true",
         default=False,
         help="Use this flag to skip the learning rate decay.",
-    )
-
-    parser.add_argument(
-        "--resume",
-        default=None,
-        type=str,
-        help="path to latest checkpoint (default: none)",
     )
     parser.add_argument(
         "--precision",
@@ -240,10 +233,23 @@ def parse_args():
         help="How many augmenations on a single image are applied in a run"
     )
     parser.add_argument(
+        "--memo-opt",
+        type=str,
+        default="SGD",
+        choices=["SGD","AdamW"],
+        help="Optimizer for the test time adaption"
+    )
+    parser.add_argument(
         "--memo-lr",
         type=float,
         default=0.001,
-        help="Learning rate for the test time adaption"
+        help="Learning rate of optimizer for the test time adaption"
+    )
+    parser.add_argument(
+        "--memo-wd",
+        type=float,
+        default=0,
+        help="Weight decay of the ptimizer for the test time adaption"
     )
     parser.add_argument(
         "--memo-steps",
@@ -270,35 +276,15 @@ def parse_args():
         "--dist-backend", default="nccl", type=str, help="distributed backend"
     )
     parser.add_argument(
-        "--skip-aggregate",
-        default=False,
-        action="store_true",
-        help="whether to aggregate features across gpus before computing the loss"
-    )
-    parser.add_argument(
         "--tensorboard",
         default=False,
         type=bool
     )
-    parser.add_argument(
-        "--debug",
-        default=False,
-        action="store_true",
-        help="If true, more information is logged."
-    )
-    parser.add_argument(
-        "--debug-run",
-        default=False,
-        action="store_true",
-        help="If true, only subset of data is used."
-    )
     
-   
 
     
 
     args = parser.parse_args()
-    args.aggregate = not args.skip_aggregate
 
     default_params = get_default_params(args.model)
     for name, val in default_params.items():

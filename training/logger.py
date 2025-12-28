@@ -1,10 +1,7 @@
-import argparse
 import logging
 from logging import Filter
 from logging.handlers import QueueHandler, QueueListener
 
-import torch
-import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.multiprocessing import Queue
 

@@ -25,13 +25,14 @@ def marginal_entropy(outputs):
     avg_logits = torch.clamp(avg_logits, min=min_real)
     return -(avg_logits * torch.exp(avg_logits)).sum(dim=-1), avg_logits
 
-def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=None, inner_opt=None):
-    if is_train:
-        meta_batch_size = args.meta_batch_size_train
-        support_size = args.support_size_train
-    else:
-        meta_batch_size = args.meta_batch_size_eval
-        support_size = args.support_size_eval
+def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=None, inner_opt=None, fold_id = None):
+    if "arm" in args.method:
+        if is_train:
+            meta_batch_size = args.meta_batch_size_train
+            support_size = args.support_size_train
+        else:
+            meta_batch_size = args.meta_batch_size_eval
+            support_size = args.support_size_eval
 
     if args.method == "erm":
         if not is_train:
@@ -39,6 +40,7 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
             with torch.no_grad():
                 pred = model(x)
         else:
+            model.train()
             pred = model(x)
         loss = loss_fn(pred, labels)
     
@@ -49,6 +51,8 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
     elif args.method == "armcml":
         batch_size, c, h, w = x.shape
         if args.adapt_bn:
+            arm_net.train()
+            model.train()
             out = []
             for i in range(meta_batch_size):
                 x_i = x[i*support_size:(i+1)*support_size]
@@ -58,6 +62,12 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
                 out.append(model(x_i))
             logits = torch.cat(out)
         else:
+            if is_train:
+                arm_net.train()
+                model.train()
+            else:
+                arm_net.eval()
+                model.eval()
             context = arm_net(x)
             context = context.reshape((meta_batch_size, support_size, args.n_context_channels, h, w))
             context = context.mean(dim=1) 
@@ -107,7 +117,6 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
         logits = []
         loss = []
         base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
-        base_model.train()
         for domain_id in range(n_domains):
             start = domain_id*support_size
             end = start + support_size
@@ -149,20 +158,20 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
             pred = model(x)
 
         else:
-            orig_params = [p.detach().clone() for p in model.parameters()]
+            #orig_params = [p.detach().clone() for p in model.parameters()]
+            orig_params = model.state_dict()
             pred = []
+            
+            if args.prior_strength < 0:
+                nn.BatchNorm2d.prior = 1
+            else:
+                nn.BatchNorm2d.prior = float(args.prior_strength) / float(args.prior_strength + 1)
 
             for x_ind in x:
                 model.eval()            
                 memo_opt = torch.optim.SGD(model.parameters(), lr=args.memo_lr)
 
-                if args.prior_strength < 0:
-                    nn.BatchNorm2d.prior = 1
-                else:
-                    nn.BatchNorm2d.prior = float(args.prior_strength) / float(args.prior_strength + 1)
-
-
-                aug_inputs = torch.stack([augment_and_mix(x_ind, seed=args.seed) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
+                aug_inputs = torch.stack([augment_and_mix(x_ind, seed=args.seed, fold_id =fold_id) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
                 for _ in range(args.memo_steps):
                     logits = model(aug_inputs)
                     memo_opt.zero_grad()
@@ -172,16 +181,11 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
                     loss.backward()
                     memo_opt.step()
 
-                if args.prior_strength < 0:
-                    nn.BatchNorm2d.prior = 1
-                else:
-                    nn.BatchNorm2d.prior = float(args.prior_strength) / float(args.prior_strength + 1)
                 with torch.no_grad():
                     pred.append(model(x_ind.unsqueeze(0)))
-                with torch.no_grad():
-                    for p, orig in zip(model.parameters(), orig_params):
-                        p.copy_(orig)
-                nn.BatchNorm2d.prior = 1
+                model.load_state_dict(orig_params)
+            
+            nn.BatchNorm2d.prior = 1
                 
             pred = torch.cat(pred, dim=0)
 
