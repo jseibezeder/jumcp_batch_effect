@@ -8,9 +8,7 @@ import time
 import logging
 import higher
 import numpy as np
-from copy import deepcopy
-from torch.nn.functional import softmax
-from training.augmentations import augment_and_mix
+from training.augmentations import augment_and_mix, add_gauss_noise
 
 
 
@@ -56,7 +54,11 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
             out = []
             for i in range(meta_batch_size):
                 x_i = x[i*support_size:(i+1)*support_size]
-                context_i = arm_net(x_i)
+                if is_train:
+                    context_i = arm_net(x_i)
+                else:
+                    with torch.no_grad():
+                        context_i = arm_net(x_i)
                 context_i = context_i.mean(dim=0).expand(support_size, -1, -1, -1)
                 x_i = torch.cat([x_i, context_i], dim=1)
                 out.append(model(x_i))
@@ -68,14 +70,25 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
             else:
                 arm_net.eval()
                 model.eval()
-            context = arm_net(x)
+            if is_train:
+                context = arm_net(x)
+            else:
+                with torch.no_grad():
+                    context = arm_net(x)
             context = context.reshape((meta_batch_size, support_size, args.n_context_channels, h, w))
             context = context.mean(dim=1) 
             context = torch.repeat_interleave(context, repeats=support_size, dim=0)
             x = torch.cat([x, context], dim=1)
-            logits = model(x)
-        
-        loss = loss_fn(logits, labels)
+            if is_train:
+                logits = model(x)
+            else:
+                with torch.no_grad():
+                    logits = model(x)
+        if is_train:
+            loss = loss_fn(logits, labels)
+        else:
+            with torch.no_grad():
+                loss = loss_fn(logits, labels)
         return logits.detach().cpu(), loss
 
 
@@ -168,10 +181,14 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
                 nn.BatchNorm2d.prior = float(args.prior_strength) / float(args.prior_strength + 1)
 
             for x_ind in x:
-                model.eval()            
-                memo_opt = torch.optim.SGD(model.parameters(), lr=args.memo_lr)
+                model.eval()           
+                if args.memo_opt=="SGD": 
+                    memo_opt = torch.optim.SGD(model.parameters(), lr=args.memo_lr, weight_decay=args.memo_wd)
+                elif args.memo_opt=="AdamW": 
+                    memo_opt = torch.optim.AdamW(model.parameters(), lr=args.memo_lr, weight_decay=args.memo_wd)
 
-                aug_inputs = torch.stack([augment_and_mix(x_ind, seed=args.seed, fold_id =fold_id) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
+                #aug_inputs = torch.stack([augment_and_mix(x_ind, severity=args.severity, fold_id =fold_id) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
+                aug_inputs = torch.stack([add_gauss_noise(x_ind) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
                 for _ in range(args.memo_steps):
                     logits = model(aug_inputs)
                     memo_opt.zero_grad()

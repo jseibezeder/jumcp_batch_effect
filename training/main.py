@@ -3,7 +3,7 @@ from training.model import ResNet, MLP, ContextNet
 from training.data import get_data, create_datasplits
 from training.train import train, evaluate
 from training.logger import setup_primary_logging, setup_worker_logging
-from training.scheduler import get_cosine_with_hard_restarts_schedule_with_warmup, get_cosine_schedule_with_warmup, get_cosine_with_warm_restarts_schedule_with_warmup
+from training.scheduler import get_cosine_schedule_with_warmup, get_cosine_with_warm_restarts_schedule_with_warmup
 
 import random
 import numpy as np
@@ -71,8 +71,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
 
     #issue on how we predict and backpropagate, since when predicting we predict per sub meta-batch
     #but the backward step failed, since we had differnent versions of the batch statistics
-    #TODO: check if really set to false for armcml
-    if args.method == "armbn" or (args.method == "armcml" and args.adapt_bn):
+    if args.method == "armbn" or args.method == "armcml":
         model_info["use_batch_running"] = False
 
     model = ResNet(**model_info)
@@ -111,7 +110,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         num_classes = model_info["output_dim"]
         device  ="cuda" if torch.cuda.is_available() else "cpu"
         arm_net = ContextNet(5, args.n_context_channels,
-                                 hidden_dim=args.cml_hidden_dim, kernel_size=5, use_running_stats=args.adapt_bn).to(device)
+                                 hidden_dim=args.cml_hidden_dim, kernel_size=5).to(device)
     
     if arm_net!=None:
         if args.precision == "fp32" or args.gpu is None:
@@ -175,10 +174,6 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         scheduler = None
         if args.lr_scheduler == "cosine":
             scheduler = get_cosine_schedule_with_warmup(optimizer, warmup=args.warmup, num_training_steps=total_steps)
-        elif args.lr_scheduler == "cosine-restarts":
-            scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(optimizer, warmup=args.warmup,
-                                                                           num_cycles=args.restart_cycles,
-                                                                           num_training_steps=total_steps)
         elif args.lr_scheduler == "cosine-warm":
             scheduler = get_cosine_with_warm_restarts_schedule_with_warmup(optimizer, warmup=args.warmup,
                                                                            start_restarts=steps_per_epoch*args.start_restart,

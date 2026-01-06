@@ -135,7 +135,7 @@ def parse_args():
     parser.add_argument(
         "--warmup", type=int, default=10000, help="Number of steps to warmup for."
     )
-    parser.add_argument("--lr-scheduler", choices=["cosine", "cosine-restarts", "cosine-warm"], default="cosine", help="LR scheduler")
+    parser.add_argument("--lr-scheduler", choices=["cosine", "cosine-warm"], default="cosine", help="LR scheduler")
     parser.add_argument("--patience", type=int, default=10, help="Patience for early stopping")
     parser.add_argument("--restart-cycles", type=int, default=1,
                         help="Number of restarts when using LR scheduler with restarts")
@@ -197,7 +197,7 @@ def parse_args():
     parser.add_argument(
         "--n-context-channels",
         type=int,
-        default=3,
+        default=5,
         help="Context channels used in ARM for ConvNets"
     )
     parser.add_argument(
@@ -262,6 +262,12 @@ def parse_args():
         type=int,
         default=16,
         help="Determine strength of BatchNorms2d on memo prediction"
+    )
+    parser.add_argument(
+        "--severity",
+        type=int,
+        default=3,
+        help="Determines strength of augmentations of AugMix. Value should be between 1 and 10"
     )
 
     

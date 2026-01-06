@@ -142,7 +142,7 @@ class MLP(nn.Module):
     
 class ContextNet(nn.Module):
 
-    def __init__(self, in_channels, out_channels, hidden_dim, kernel_size, use_running_stats=True):
+    def __init__(self, in_channels, out_channels, hidden_dim, kernel_size):
         super(ContextNet, self).__init__()
 
         # Keep same dimensions
@@ -150,13 +150,19 @@ class ContextNet(nn.Module):
 
         self.context_net = nn.Sequential(
                                 nn.Conv2d(in_channels, hidden_dim, kernel_size, padding=padding),
-                                nn.BatchNorm2d(hidden_dim, track_running_stats=use_running_stats),
+                                nn.BatchNorm2d(hidden_dim, track_running_stats=False),
                                 nn.ReLU(inplace=False),
                                 nn.Conv2d(hidden_dim, hidden_dim, kernel_size, padding=padding),
-                                nn.BatchNorm2d(hidden_dim, track_running_stats=use_running_stats),
+                                nn.BatchNorm2d(hidden_dim, track_running_stats=False),
                                 nn.ReLU(inplace=False),
                                 nn.Conv2d(hidden_dim, out_channels, kernel_size, padding=padding)
                             )
+        """
+        self.context_net = nn.Sequential(
+                                nn.Conv2d(in_channels, hidden_dim, kernel_size, padding=padding),
+                                nn.BatchNorm2d(hidden_dim, track_running_stats=use_running_stats),
+                                nn.ReLU(inplace=False),
+                                nn.Conv2d(hidden_dim, out_channels, kernel_size, padding=padding))"""
 
 
     def forward(self, x):
