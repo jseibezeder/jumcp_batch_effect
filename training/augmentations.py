@@ -48,40 +48,24 @@ def autocontrast(img, _level):
 
     return ((img - minimum) * scale).clamp(0, 1).to(img.dtype)
 
-#TODO:
+
 def _scale_channel(img_chan) :
     img = img_chan.clamp(0, 1)
     hist = torch.histc(img, bins=256, min=0.0, max=1.0)
     cdf = hist.cumsum(0)
-    cdf = cdf / cdf[-1]  # normalize to [0,1]
+    cdf = cdf / cdf[-1]
 
-    # Create bin centers
     bin_edges = torch.linspace(0, 1, 256 + 1, device=img.device)
 
-    # Quantize image to bins
     img_flat = img.reshape(-1)
     bin_idx = torch.bucketize(img_flat, bin_edges, right=True) - 1
     bin_idx = bin_idx.clamp(0, 256 - 1)
-
-    # LUT mapping via CDF
     img_eq = cdf[bin_idx]
 
     return img_eq.reshape(img.shape)
 
 
 def equalize(img, _level):
-    """C, H, W = img.shape
-    out = torch.zeros_like(img)
-    for c in range(C):
-        flat = img[c].flatten()
-        hist = torch.histc(flat, bins=256, min=0.0, max=1.0)
-        cdf = hist.cumsum(0)
-        cdf = (cdf - cdf.min()) / (cdf.max() - cdf.min() + 1e-8)
-        lut = (cdf * 255).clamp(0,255).to(torch.int64)
-        vals = (flat * 255).to(torch.int64)
-        out[c] = (lut[vals].reshape(H,W).float() / 255.0)
-    return out"""
-    #return TF.equalize(img)
     return torch.stack([_scale_channel(img[c]) for c in range(img.size(0))])
 
 def posterize(img, level):
@@ -161,9 +145,7 @@ def normalize(image, fold_id):
     mean=MEANS[fold_id],
     std=STDS[fold_id]
   )
-  """mean, std = np.array(MEANS[fold_id]), np.array(STDS[fold_id])
-  image = (image - mean[:, None, None]) / std[:, None, None]
-  return image"""
+
   return normalize(image)
 
 
@@ -175,7 +157,7 @@ def apply_op(image, op, severity):
 
 
 
-def augment_and_mix(image, severity=3, width=3, depth=-1, alpha=1., seed=1234, fold_id = None):
+def augment_and_mix(image, severity=3, width=3, depth=-1, alpha=1., fold_id = None):
   """Perform AugMix augmentations and compute mixture.
 
   Args:
@@ -190,7 +172,6 @@ def augment_and_mix(image, severity=3, width=3, depth=-1, alpha=1., seed=1234, f
     mixed: Augmented and mixed image.
   """
   
-  
   ws = torch.distributions.Dirichlet(torch.ones(width) * alpha).sample().to(image.device)
   m  = torch.distributions.Beta(alpha, alpha).sample().to(image.device)
 
@@ -204,9 +185,7 @@ def augment_and_mix(image, severity=3, width=3, depth=-1, alpha=1., seed=1234, f
       image_aug = apply_op(image_aug, op, severity)
     # Preprocessing commutes since all coefficients are convex
     mix += ws[i] * normalize(image_aug, fold_id)
-#TODO: write like memo
 
-  #mixed = (1 - m) * normalize(image) + m * mix
   mixed = m * img_pre + (1 - m) * mix
 
   return mixed

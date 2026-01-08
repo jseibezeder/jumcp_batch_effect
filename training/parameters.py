@@ -269,6 +269,31 @@ def parse_args():
         default=3,
         help="Determines strength of augmentations of AugMix. Value should be between 1 and 10"
     )
+    ############# TENT ##################
+    parser.add_argument(
+        "--tent-momentum",
+        type=float,
+        default=0.9,
+        help="Momentum parameter of the SGD optimizer in tent"
+    )
+    parser.add_argument(
+        "--tent-steps",
+        type=int,
+        default=1,
+        help="Steps for the test time adaption"
+    )
+    parser.add_argument(
+        "--tent-lr",
+        type=float,
+        default=0.001,
+        help="Learning rate of optimizer for the test time adaption"
+    )
+    parser.add_argument(
+        "--episodic",
+        type=bool,
+        default=False,
+        help="Whether to reset the model parameter after each prediction"
+    )
 
     
     ######################## Distributed Training ###########################

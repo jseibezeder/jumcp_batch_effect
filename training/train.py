@@ -9,6 +9,7 @@ import logging
 import higher
 import numpy as np
 from training.augmentations import augment_and_mix, add_gauss_noise
+from copy import deepcopy
 
 
 
@@ -22,6 +23,12 @@ def marginal_entropy(outputs):
     min_real = torch.finfo(avg_logits.dtype).min
     avg_logits = torch.clamp(avg_logits, min=min_real)
     return -(avg_logits * torch.exp(avg_logits)).sum(dim=-1), avg_logits
+
+#loss for tent
+@torch.jit.script
+def softmax_entropy(x: torch.Tensor) -> torch.Tensor:
+    """Entropy of softmax distribution from logits."""
+    return -(x.softmax(1) * x.log_softmax(1)).sum(1)
 
 def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=None, inner_opt=None, fold_id = None):
     if "arm" in args.method:
@@ -172,7 +179,7 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
 
         else:
             #orig_params = [p.detach().clone() for p in model.parameters()]
-            orig_params = model.state_dict()
+            model_state = deepcopy(model.state_dict())
             pred = []
             
             if args.prior_strength < 0:
@@ -182,25 +189,21 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
 
             for x_ind in x:
                 model.eval()           
-                if args.memo_opt=="SGD": 
-                    memo_opt = torch.optim.SGD(model.parameters(), lr=args.memo_lr, weight_decay=args.memo_wd)
-                elif args.memo_opt=="AdamW": 
-                    memo_opt = torch.optim.AdamW(model.parameters(), lr=args.memo_lr, weight_decay=args.memo_wd)
 
-                #aug_inputs = torch.stack([augment_and_mix(x_ind, severity=args.severity, fold_id =fold_id) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
-                aug_inputs = torch.stack([add_gauss_noise(x_ind) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
+                aug_inputs = torch.stack([augment_and_mix(x_ind, severity=args.severity, fold_id =fold_id) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
+                #aug_inputs = torch.stack([add_gauss_noise(x_ind) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
                 for _ in range(args.memo_steps):
                     logits = model(aug_inputs)
-                    memo_opt.zero_grad()
+                    inner_opt.zero_grad()
 
                     loss, logits = marginal_entropy(logits)
                     
                     loss.backward()
-                    memo_opt.step()
+                    inner_opt.step()
 
                 with torch.no_grad():
                     pred.append(model(x_ind.unsqueeze(0)))
-                model.load_state_dict(orig_params)
+                model.load_state_dict(model_state, strict=True)
             
             nn.BatchNorm2d.prior = 1
                 
@@ -209,6 +212,27 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
         loss = loss_fn(pred, labels)
     
         return pred, loss
+    elif args.method == "tent":
+        if is_train:
+            pred = model(x)
+        else:
+            if args.episodic:
+                model_state = deepcopy(model.state_dict())
+                inner_opt_state = deepcopy(inner_opt.state_dict())
+            for _ in range(args.tent_steps):
+                pred = model(x)
+                loss = softmax_entropy(pred).mean(0)
+                loss.backward()
+                inner_opt.step()
+                inner_opt.zero_grad()
+            if args.episodic:
+                model.load_state_dict(model_state, strict=True)
+                inner_opt.load_state_dict(inner_opt_state)
+            
+        loss = loss_fn(pred, labels)
+
+        return pred, loss
+
 
 
 
@@ -244,9 +268,6 @@ def train(model, data, epoch, optimizer, scheduler, args, tb_writer=None, arm_ne
         if args.gpu is not None:
             images = imgs.cuda(args.gpu, non_blocking=True)
             labels = labels.cuda(args.gpu, non_blocking=True)
-        if args.precision == "fp16":
-            images = images.half()
-            #labels = labels.half()
 
 
         data_time = time.time() - end
@@ -326,9 +347,6 @@ def evaluate(model, data, epoch, args, tb_writer=None, steps=None, arm_net = Non
         if args.gpu is not None:
             images = images.cuda(args.gpu, non_blocking=True)
             labels = labels.cuda(args.gpu, non_blocking=True)
-        if args.precision == "fp16":
-            images = images.half()
-            #labels = labels.half()
 
         features, loss = predict_and_loss(base_model,images,args, is_train=False, loss_fn=loss_fn, labels=labels, arm_net=base_arm_net,inner_opt=inner_opt)
 

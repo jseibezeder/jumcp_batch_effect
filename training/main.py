@@ -76,7 +76,6 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
 
     model = ResNet(**model_info)
 
-    # See https://discuss.pytorch.org/t/valueerror-attemting-to-unscale-fp16-gradients/81372
     if args.precision == "fp32" or args.gpu is None:
         convert_models_to_fp32(model)
     else:
@@ -303,6 +302,8 @@ def main():
         return -1
 
     assert args.precision in ['fp16', 'fp32']
+    if args.precision=='fp16':
+        raise NotImplementedError()
 
     torch.multiprocessing.set_start_method("spawn", force=True)
 
