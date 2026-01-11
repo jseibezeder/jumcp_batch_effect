@@ -23,15 +23,15 @@ python -u training/main.py \
 --image-path="your-img-path" \
 --mapping="your-mapping-path" \
 ```
-The exact commands and experiment configerations for creating the models can be found here: TODO
+The exact commands and experiment configerations for creating the models can be found in the `train_commands.sh` file.
 
 The training applies k-fold cross-validation on the data and trains for n epcohs using early stopping. It also evaluates afeter each epoch on the validation set and saves the best models according to the loss.
 
 ## Data and Pretrained models
-The pretrained model weights used for evaluation and used data file can be found here: TODO: add huggingface
+The pretrained model weights used for evaluation and used data file can be found here: https://huggingface.co/pandahd03/jumpcp_batch_effect
 For more information on how to download the JUMP-CP dataset please refer to: https://jump-cellpainting.broadinstitute.org/
 
 ## Evaluation and Plots
 
 The necessary files for testing and plotting results are found in the `notebooks` folder.
-TODO: more information about testing
+
