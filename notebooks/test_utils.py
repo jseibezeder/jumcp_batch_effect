@@ -100,17 +100,21 @@ def main(test_file, model_path, model_name, img_path, mapping_path, args, cv_fol
                     for namep, p in m.named_parameters():
                         if namep in ['weight', 'bias']:  # weight is scale, bias is shift
                             parameters.append(p)
+        else:
+            model.requires_grad_(True)
 
 
 
         if args.method == "memo":
             if args.subset:                     #for hyperparameter search
-                np.random.seed(42)
+                np.random.seed(args.seed)
                 subset = np.random.choice(len(test_idx), size=450, replace=False)
                 test_data = CustomSubset(dataset, subset)
             if args.prior_strength>=0:
                 nn.BatchNorm2d.prior = float(args.prior_strength) / float(args.prior_strength + 1)
                 nn.BatchNorm2d.forward = _modified_bn_forward
+        
+
                 
         """
         #for precomputing statistics
@@ -159,7 +163,7 @@ def main(test_file, model_path, model_name, img_path, mapping_path, args, cv_fol
                     memo_opt = torch.optim.SGD(model.parameters(), lr=args.memo_lr, weight_decay=args.memo_wd)
                 elif args.memo_opt=="AdamW": 
                     memo_opt = torch.optim.AdamW(model.parameters(), lr=args.memo_lr, weight_decay=args.memo_wd)
-                predictions, loss = predict_and_loss(model,imgs,args,labels,loss_fn, is_train=False, inner_opt=memo_opt, fold_id =fold_id)
+                predictions, loss = predict_and_loss(model,imgs,args,labels,loss_fn, is_train=False, inner_opt=memo_opt, fold_id =fold_id, use_augmix=args.use_augmix)
             else:
                 predictions, loss = predict_and_loss(model,imgs,args,labels,loss_fn, is_train=False)
 
@@ -218,41 +222,127 @@ def _modified_bn_forward(self, input):
 
 
 
-def compute_metrics(data, id_mapping, verbose=True):
+def compute_metrics(data, id_mapping, verbose=True, ablation=False):
     accuracies = []
     for pred, labels, metadata in data:
         pred_labels = torch.argmax(pred, dim=1).cpu()
         correct = (pred_labels == labels.cpu()).sum().item()
         acc = correct/len(labels)
         accuracies.append(acc)
-    if verbose:
+    if verbose or ablation:
         print(f"Individual acc: {accuracies}")
         print(f"Test set: \n Mean: {np.mean(accuracies)}\n Std: {np.std(accuracies)}")
         print("\n Accuracy per label")
     
-    #compute accuracy per label    
     label_accs = []
-    for i, (pred, labels, metadata) in enumerate(data):
-        if verbose: print(f"Fold {i+1}")
-        label_acc = {}
-        collect = []
-        labels = labels.cpu()
-        for i in labels.unique():
-            filter_pred = pred[labels==i]
-            filter_pred = torch.argmax(filter_pred, dim=1).cpu()
-            correct = (filter_pred == i).sum().item()
-            acc = correct/len(filter_pred)
+    if not ablation:
+        #compute accuracy per label    
+        for fold, (pred, labels, metadata) in enumerate(data):
+            if verbose: print(f"Fold {fold+1}")
+            label_acc = {}
+            collect = []
+            labels = labels.cpu()
+            for i in labels.unique():
+                filter_pred = pred[labels==i]
+                filter_pred = torch.argmax(filter_pred, dim=1).cpu()
+                correct = (filter_pred == i).sum().item()
+                acc = correct/len(filter_pred)
 
-            key = id_mapping[str(i.item())]
-            if key not in label_acc:
-                label_acc[key] = []
-            label_acc[key].append(acc)
+                key = id_mapping[str(i.item())]
+                if key not in label_acc:
+                    label_acc[key] = []
+                label_acc[key].append(acc)
 
-        for key, value in label_acc.items():
-            collect.append(np.mean(value))
-            if verbose: print(f"{key}: {np.mean(value)}")
-        label_accs.append(collect)
+            for key, value in label_acc.items():
+                collect.append(np.mean(value))
+                if verbose: print(f"{key}: {np.mean(value)}")
+            label_accs.append(collect)
     
     return accuracies, label_accs
     
 
+def ablation(test_file, model_path, model_name, img_path, mapping_path, id_mapping,args, cv_folds=5, loss_fn = nn.CrossEntropyLoss()):
+
+    data_args = Namespace(
+    split_type = "seperated",
+    add_val = False,
+    train_file = test_file,
+    cross_validation = cv_folds
+    )
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    #print(torch.cuda.device_count())
+    aug_names = ["autocontrast", "equalize", "posterize", "rotate", "solarize", "shear_x", "shear_y", "translate_x", "translate_y"]
+
+    
+    transforms = transform_function(n_px_tr=250, n_px_val=250, is_train=False, preprocess="crop", normalize=None)
+    dataset = JUMPCPDataset(test_file, img_path,mapping_path,transforms)
+    
+
+    for holdout_id in range(6,9):
+        data = []
+        for fold_id in tqdm(range(cv_folds), desc="Fold"):
+            all_predictions = []
+            all_labels = []
+            all_metadata = []
+            train_idx, _, test_idx = create_datasplits(data_args, seed_id=SEED+fold_id)
+            model, arm_model = load_model(args, model_path[fold_id], device, model_name, use_running=True)
+            test_data = CustomSubset(dataset, test_idx)
+
+            if args.method == "memo":
+                if args.subset:                     #for hyperparameter search
+                    np.random.seed(args.seed)
+                    subset = np.random.choice(len(test_idx), size=450, replace=False)
+                    test_data = CustomSubset(dataset, subset)
+                if args.prior_strength>=0:
+                    nn.BatchNorm2d.prior = float(args.prior_strength) / float(args.prior_strength + 1)
+                    nn.BatchNorm2d.forward = _modified_bn_forward
+            
+
+                    
+            """
+            #for precomputing statistics
+            if args.method == "memo":
+                print("Computing stats")
+                train_data = CustomSubset(dataset, train_idx)
+                stats = compute_stats(train_data)
+                print("Computed stats")
+                print(stats)
+                continue"""
+
+            dataloader = DataLoader(
+                test_data,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.workers,
+                pin_memory=True,
+                drop_last=False
+            )
+
+            
+            for batch in dataloader:
+                imgs, labels,_, metadata = batch
+                imgs = imgs.to(device)
+                labels = labels.to(device)
+
+                if args.memo_opt=="SGD": 
+                    memo_opt = torch.optim.SGD(model.parameters(), lr=args.memo_lr, weight_decay=args.memo_wd)
+                elif args.memo_opt=="AdamW": 
+                    memo_opt = torch.optim.AdamW(model.parameters(), lr=args.memo_lr, weight_decay=args.memo_wd)
+                predictions, loss = predict_and_loss(model,imgs,args,labels,loss_fn, is_train=False, inner_opt=memo_opt, fold_id =fold_id, ablation = holdout_id)
+
+                all_predictions.append(predictions)
+                all_labels.append(labels)
+                all_metadata.append(metadata)
+
+            flat_metadata = []
+            for batch_meta in all_metadata:  # each is a dict of lists
+                (batch_key, batch_items), (source_key, source_items) = batch_meta.items()
+                for i in range(len(batch_items)):
+                    flat_metadata.append({batch_key: batch_items[i], source_key: source_items[i]})
+            
+            data.append([torch.cat(all_predictions), torch.cat(all_labels), pd.DataFrame(flat_metadata)])
+        print(f"Drop {aug_names[holdout_id]}")
+        compute_metrics(data, id_mapping, verbose=False, ablation=True)
+
+    

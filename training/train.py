@@ -8,7 +8,7 @@ import time
 import logging
 import higher
 import numpy as np
-from training.augmentations import augment_and_mix, add_gauss_noise
+from training.augmentations import augment_and_mix, get_aug
 from copy import deepcopy
 
 
@@ -30,7 +30,7 @@ def softmax_entropy(x: torch.Tensor) -> torch.Tensor:
     """Entropy of softmax distribution from logits."""
     return -(x.softmax(1) * x.log_softmax(1)).sum(1)
 
-def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=None, inner_opt=None, fold_id = None):
+def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=None, inner_opt=None, fold_id = None, ablation=None, use_augmix=True):
     if "arm" in args.method:
         if is_train:
             meta_batch_size = args.meta_batch_size_train
@@ -189,9 +189,11 @@ def predict_and_loss(model, x, args, labels, loss_fn, is_train=True, arm_net=Non
 
             for x_ind in x:
                 model.eval()           
-
-                aug_inputs = torch.stack([augment_and_mix(x_ind, severity=args.severity, fold_id =fold_id) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
-                #aug_inputs = torch.stack([add_gauss_noise(x_ind) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
+                aug = get_aug()
+                if use_augmix:
+                    aug_inputs = torch.stack([augment_and_mix(x_ind, severity=args.severity, fold_id =fold_id, ablation=ablation) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
+                else:
+                    aug_inputs = torch.stack([aug(x_ind) for _ in range(args.k_augmentations)], dim=0).requires_grad_()
                 for _ in range(args.memo_steps):
                     logits = model(aug_inputs)
                     inner_opt.zero_grad()

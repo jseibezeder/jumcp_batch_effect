@@ -5,6 +5,7 @@ import random
 import torch
 import torchvision.transforms.functional as TF
 import torchvision
+import torch.nn.functional as F
 
 
 def int_parameter(level, maxval):
@@ -157,7 +158,7 @@ def apply_op(image, op, severity):
 
 
 
-def augment_and_mix(image, severity=3, width=3, depth=-1, alpha=1., fold_id = None):
+def augment_and_mix(image, severity=3, width=3, depth=-1, alpha=1., fold_id = None, ablation=None):
   """Perform AugMix augmentations and compute mixture.
 
   Args:
@@ -171,6 +172,9 @@ def augment_and_mix(image, severity=3, width=3, depth=-1, alpha=1., fold_id = No
   Returns:
     mixed: Augmented and mixed image.
   """
+  augs = augmentations.copy()
+  if ablation!=None:
+     augs.pop(ablation)
   
   ws = torch.distributions.Dirichlet(torch.ones(width) * alpha).sample().to(image.device)
   m  = torch.distributions.Beta(alpha, alpha).sample().to(image.device)
@@ -181,7 +185,7 @@ def augment_and_mix(image, severity=3, width=3, depth=-1, alpha=1., fold_id = No
     image_aug = image.clone()
     d = depth if depth > 0 else np.random.randint(1, 4)
     for _ in range(d):
-      op = np.random.choice(augmentations)
+      op = np.random.choice(augs)
       image_aug = apply_op(image_aug, op, severity)
     # Preprocessing commutes since all coefficients are convex
     mix += ws[i] * normalize(image_aug, fold_id)
@@ -189,3 +193,76 @@ def augment_and_mix(image, severity=3, width=3, depth=-1, alpha=1., fold_id = No
   mixed = m * img_pre + (1 - m) * mix
 
   return mixed
+
+
+
+class GaussianNoise:
+    def __init__(self, std=2):
+        self.std = std
+
+    def __call__(self, x):
+        return x + torch.randn_like(x) * self.std
+
+
+class PoissonNoise:
+    def __call__(self, x):
+        # assumes x >= 0
+        x = torch.clamp(x, min=0.0)
+        return torch.poisson(x)
+
+
+class GaussianBlur:
+    def __init__(self, kernel_size=3, sigma=(0.1, 1.0)):
+        self.kernel_size = kernel_size
+        self.sigma = sigma
+
+    def __call__(self, x):
+        sigma = random.uniform(*self.sigma)
+        return TF.gaussian_blur(x, self.kernel_size, [sigma, sigma])
+class IntensityJitter:
+    def __init__(self, brightness=0.15, contrast=0.15):
+        self.brightness = brightness
+        self.contrast = contrast
+
+    def __call__(self, x):
+        # brightness
+        b = 1.0 + random.uniform(-self.brightness, self.brightness)
+        x = x * b
+
+        # contrast (global, not per-channel)
+        mean = x.mean(dim=(1, 2), keepdim=True)
+        c = 1.0 + random.uniform(-self.contrast, self.contrast)
+        x = (x - mean) * c + mean
+
+        return x
+    
+class RandomOneOf:
+    def __init__(self, transforms):
+        self.transforms = transforms
+
+    def __call__(self, x):
+        t1 = random.choice(self.transforms)
+        t2 = random.choice(self.transforms)
+        return t2(t1(x))
+        return t1(x)
+    
+microscopy_aug = RandomOneOf([
+    lambda x: TF.hflip(x),
+    lambda x: TF.vflip(x),
+    lambda x: TF.resized_crop(
+        x,
+        top=random.randint(0, int(0.15 * x.shape[1])),
+        left=random.randint(0, int(0.15 * x.shape[2])),
+        height=int(0.85 * x.shape[1]),
+        width=int(0.85 * x.shape[2]),
+        size=[250, 250],
+        antialias=True
+    ),
+    IntensityJitter(brightness=0.15, contrast=0.15),
+    GaussianNoise(std=0.01),
+    PoissonNoise(),
+    GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
+])
+
+def get_aug():
+    return microscopy_aug

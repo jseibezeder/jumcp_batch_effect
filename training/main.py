@@ -78,8 +78,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
 
     if args.precision == "fp32" or args.gpu is None:
         convert_models_to_fp32(model)
-    else:
-        model = model.half()
+
 
 
     if not torch.cuda.is_available():
@@ -114,8 +113,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     if arm_net!=None:
         if args.precision == "fp32" or args.gpu is None:
             convert_models_to_fp32(arm_net)
-        else:
-            arm_net = arm_net.half()
+
         if args.distributed and args.use_bn_sync:
             arm_net = torch.nn.SyncBatchNorm.convert_sync_batchnorm(arm_net)
         if args.distributed:
@@ -229,7 +227,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             elif loss != np.inf:
                 counter += 1
 
-            if counter > args.patience:
+            if counter >= args.patience:
                 early_stop += 1
 
 
