@@ -1,6 +1,6 @@
-# jumcp_batch_effect
+# Bachelor thesis: An Evaluation of Domain Shift-Adaptive Methods on Cellular Microscopy Image Classification
 
-This repsoitory hosts the implementation and experimental setup used for my bachelor's thesis. All scripts required to reproduce the results and figures in the thesis are provided
+This repository hosts the implementation and experimental setup used for my bachelor's thesis. All scripts required to reproduce the results and figures in the thesis are provided
 
 ## Installation
 
@@ -23,9 +23,9 @@ python -u training/main.py \
 --image-path="your-img-path" \
 --mapping="your-mapping-path" \
 ```
-The exact commands and experiment configerations for creating the models can be found in the `train_commands.sh` file.
+The exact commands and experiment configurations for creating the models can be found in the `train_commands.sh` file.
 
-The training applies k-fold cross-validation on the data and trains for n epcohs using early stopping. It also evaluates afeter each epoch on the validation set and saves the best models according to the loss.
+The training applies k-fold cross-validation on the data and trains for n epochs using early stopping. It also evaluates after each epoch on the validation set and saves the best models according to the loss.
 
 ## Data and Pretrained models
 The pretrained model weights used for evaluation and used data file can be found here: https://huggingface.co/pandahd03/jumpcp_batch_effect
