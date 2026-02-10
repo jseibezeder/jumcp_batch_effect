@@ -1,4 +1,4 @@
-# Bachelor thesis: An Evaluation of Domain Shift-Adaptive Methods on Cellular Microscopy Image Classification
+# Bachelor thesis: An Evaluation of Domain Adaptation Methods for Mechanism of Action Classification on Microscopy Images
 
 This repository hosts the implementation and experimental setup used for my bachelor's thesis. All scripts required to reproduce the results and figures in the thesis are provided
 
